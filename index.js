@@ -189,13 +189,14 @@ app.post("/api/chat", async (req, res) => {
   }
 });
 
+
 // ---------------- WEATHER CARD API ----------------
 app.get("/api/weather", async (req, res) => {
   const city = req.query.city;
   if (!city) return res.status(400).json({ error: "City required" });
 
   try {
-    const apiKey = process.env.OPEN_WEATHER ;
+    const apiKey = process.env.OPEN_WEATHER;
     const url = new URL("https://api.openweathermap.org/data/2.5/weather");
     url.searchParams.set("q", city);
     url.searchParams.set("appid", apiKey);
@@ -204,15 +205,22 @@ app.get("/api/weather", async (req, res) => {
     const response = await fetch(url.toString());
     const data = await response.json();
 
+    // Handle invalid response (city not found / quota exceeded / bad key)
+    if (!response.ok || !data.main) {
+      return res.status(404).json({
+        error: data.message || `Could not find weather for "${city}"`,
+      });
+    }
+
     return res.json({
       city: data.name,
       temp: data.main.temp,
       humidity: data.main.humidity,
       wind: data.wind.speed,
-      condition: data.weather[0].description,
+      condition: data.weather?.[0]?.description || "Unknown",
     });
   } catch (error) {
-    console.error(error);
+    console.error("Weather API error:", error);
     return res.status(500).json({ error: "Unable to fetch weather" });
   }
 });
