@@ -26,7 +26,7 @@ const llm = new ChatOpenAI({
   temperature: 0.4,
   maxTokens: 1024,
   configuration: {
-    apiKey: process.env.OPENROUTER_KEY || "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",
+    apiKey: process.env.OPENROUTER_KEY ,
     baseURL: "https://openrouter.ai/api/v1",
     defaultHeaders: {
       "HTTP-Referer": process.env.APP_URL || "http://localhost:3000",
@@ -44,7 +44,7 @@ const weatherSchema = z.object({
 // ------------- TOOL IMPLEMENTATION -------------
 const getWeatherTool = tool(
   async ({ city, type }) => {
-    const apiKey = "883d0adeb104c086c204f7e081afd13e";
+    const apiKey = process.env.OPEN_WEATHER;
 
     try {
       if (type === "forecast") {
@@ -195,7 +195,7 @@ app.get("/api/weather", async (req, res) => {
   if (!city) return res.status(400).json({ error: "City required" });
 
   try {
-    const apiKey = "883d0adeb104c086c204f7e081afd13e";
+    const apiKey = process.env.OPEN_WEATHER ;
     const url = new URL("https://api.openweathermap.org/data/2.5/weather");
     url.searchParams.set("q", city);
     url.searchParams.set("appid", apiKey);
