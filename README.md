@@ -35,7 +35,7 @@ Built with React + Vite frontend and FastAPI / Node Express backend.
 
 🏗 Tech Stack
 Category	Tech
-Frontend	React + Vite, Tailwind (optional)
+Frontend	React + Vite
 Backend	FastAPI / Express.js
 AI	LangChain + OpenRouter (GPT-4o Mini)
 Weather API	OpenWeather Map
@@ -52,7 +52,7 @@ weather-ai/
 │   ├── vite.config.js
 │   └── package.json
 │
-└── 
+└── Backend
     ├── index.js (Node Version) or app.py (FastAPI version)
     ├── .env
     ├── package.json / requirements.txt
@@ -93,56 +93,6 @@ uvicorn app:app --reload
 cd frontend
 npm install
 npm run dev
-
-
-Frontend:
-
-http://localhost:5173
-
-🧪 API Endpoints
-Chat
-POST /api/chat
-{
-  "message": "Tell me weather in Mumbai",
-  "history": [],
-  "lastCity": null
-}
-
-Weather Card API
-GET /api/weather?city=Delhi
-
-📌 Example Responses
-
-Current Weather
-
-Current weather in Pune:
-🌡 Temp: 25°C (feels like 24°C)
-☁️ Few clouds
-💧 Humidity: 63%
-💨 Wind: 2.1 m/s
-
-
-5-Day Forecast
-
-🌦 5-Day Forecast for Delhi
-
-📅 2024-11-30
-🌡 Temp: 24°C (feels 23°C)
-☁️ Light clouds
-💨 Wind: 1.4 m/s
-
-🚀 Deployment
-Platform	Suitable for
-Vercel	Frontend deployment
-Netlify	Frontend deployment
-Render	Backend
-Railway	Backend free plan
-Fly.io	Optional backend
-
-Basic deployment workflow:
-
-Frontend → Vercel
-Backend → Render (Node or FastAPI)
 
 
 🤝 Contributing
