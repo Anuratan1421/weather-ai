@@ -48,7 +48,7 @@ class WeatherResponse(BaseModel):
 
 # ---------------- CONFIGURATION ----------------
 OPENROUTER_KEY = os.getenv("OPENROUTER_KEY")
-OPENWEATHER_API_KEY = os.getenv("OPEN_WEATHER")
+OPENWEATHER_API_KEY = os.getenv("OPEN_WEATHER_API_KEY")
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 
 SYSTEM_PROMPT = """
