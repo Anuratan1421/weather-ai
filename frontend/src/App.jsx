@@ -15,7 +15,7 @@ function App() {
   const fetchWeather = async (city) => {
     setLoading(true)
     try {
-      const res = await fetch(`http://127.0.0.1:3000/api/weather?city=${city}`)
+      const res = await fetch(`https://sanch-ai.vercel.app/api/weather?city=${city}`)
       const data = await res.json()
       setWeatherData(data)
     } catch (error) {
