@@ -47,8 +47,8 @@ class WeatherResponse(BaseModel):
     condition: str
 
 # ---------------- CONFIGURATION ----------------
-OPENROUTER_KEY = os.getenv("OPENROUTER_KEY", "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")
-OPENWEATHER_API_KEY = "883d0adeb104c086c204f7e081afd13e"
+OPENROUTER_KEY = os.getenv("OPENROUTER_KEY")
+OPENWEATHER_API_KEY = os.getenv("OPEN_WEATHER")
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 
 SYSTEM_PROMPT = """
@@ -163,7 +163,7 @@ async def call_llm(messages: List[dict]) -> dict:
         headers = {
             "Authorization": f"Bearer {OPENROUTER_KEY}",
             "Content-Type": "application/json",
-            "HTTP-Referer": os.getenv("APP_URL", "http://localhost:8000"),
+            "HTTP-Referer": os.getenv("APP_URL", "http://localhost:3000"),
             "X-Title": os.getenv("APP_TITLE", "Weather Chatbot"),
         }
         
