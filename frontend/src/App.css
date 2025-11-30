@@ -1,0 +1,54 @@
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+  width: 100%;
+}
+
+body {
+  width: 100%;
+  overflow-x: hidden;
+}
+
+
+
+.app-container {
+
+  font-family: "Arimo", sans-serif;
+  background: linear-gradient(135deg, #e4e6eb 0%, #e6e3e9 100%);
+  min-height: 100vh;
+  width: 100%;
+}
+
+.main-content {
+  flex: 1;
+  display: flex;
+  justify-content: space-around;
+  align-items: center;
+  padding: 40px;
+  width: 100%;
+}
+
+.content-wrapper {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  gap: 100px;
+  width: 100%;
+  max-width: 100%;
+  padding: 0 40px;
+}
+
+@media (max-width: 968px) {
+  .content-wrapper {
+    grid-template-columns: 1fr;
+  }
+  
+  .main-content {
+    padding: 20px;
+  }
+  
+  .content-wrapper {
+    padding: 0 20px;
+  }
+}
