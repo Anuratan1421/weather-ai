@@ -44,7 +44,7 @@ const weatherSchema = z.object({
 // ------------- TOOL IMPLEMENTATION -------------
 const getWeatherTool = tool(
   async ({ city, type }) => {
-    const apiKey = process.env.OPEN_WEATHER_API_KEY;
+    const apiKey = process.env.OPEN_WEATHER;
 
     try {
       if (type === "forecast") {
@@ -195,7 +195,7 @@ app.get("/api/weather", async (req, res) => {
   if (!city) return res.status(400).json({ error: "City required" });
 
   try {
-    const apiKey = process.env.OPENWEATHER_API_KEY;
+    const apiKey = process.env.OPEN_WEATHER ;
     const url = new URL("https://api.openweathermap.org/data/2.5/weather");
     url.searchParams.set("q", city);
     url.searchParams.set("appid", apiKey);
