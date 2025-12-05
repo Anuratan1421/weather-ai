@@ -3,7 +3,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
-from typing import List, Optional, Literal
+from typing import List, Optional
 import httpx
 import os
 from dotenv import load_dotenv
@@ -21,10 +21,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Serve static files (frontend)
-# app.mount("/", StaticFiles(directory="public", html=True), name="public")
 
-# ---------------- MODELS ----------------
+# MODELS 
 class Message(BaseModel):
     type: str
     text: str
@@ -46,7 +44,7 @@ class WeatherResponse(BaseModel):
     wind: float
     condition: str
 
-# ---------------- CONFIGURATION ----------------
+# CONFIGURATION 
 OPENROUTER_KEY = os.getenv("OPENROUTER_KEY")
 OPENWEATHER_API_KEY = os.getenv("OPEN_WEATHER_API_KEY")
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
@@ -66,7 +64,7 @@ RULES:
 - Do NOT talk about anything unrelated to weather.
 """
 
-# ---------------- TOOL DEFINITIONS ----------------
+# TOOL DEFINITIONS
 TOOLS = [
     {
         "type": "function",
@@ -93,7 +91,7 @@ TOOLS = [
     }
 ]
 
-# ---------------- WEATHER TOOL IMPLEMENTATION ----------------
+# WEATHER TOOL IMPLEMENTATION
 async def get_weather_tool(city: str, weather_type: str = "current") -> str:
     """Fetch weather data from OpenWeatherMap API"""
     async with httpx.AsyncClient() as client:
@@ -156,7 +154,7 @@ async def get_weather_tool(city: str, weather_type: str = "current") -> str:
             print(f"Weather tool error: {err}")
             return f'Error looking up weather for "{city}".'
 
-# ---------------- LLM CALL ----------------
+#  LLM CALL 
 async def call_llm(messages: List[dict]) -> dict:
     """Call OpenRouter API with tool support"""
     async with httpx.AsyncClient() as client:
@@ -179,7 +177,7 @@ async def call_llm(messages: List[dict]) -> dict:
         response.raise_for_status()
         return response.json()
 
-# ---------------- CHAT ENDPOINT ----------------
+
 @app.post("/api/chat", response_model=ChatResponse)
 async def chat(request: ChatRequest):
     try:
@@ -253,7 +251,7 @@ async def chat(request: ChatRequest):
         print(f"Chat error: {error}")
         raise HTTPException(status_code=500, detail="Internal error")
 
-# ---------------- WEATHER CARD API ----------------
+
 @app.get("/api/weather", response_model=WeatherResponse)
 async def get_weather(city: str):
     if not city:
@@ -284,12 +282,9 @@ async def get_weather(city: str):
         print(f"Weather API error: {error}")
         raise HTTPException(status_code=500, detail="Unable to fetch weather")
 
-# ---------------- HEALTH CHECK ----------------
-@app.get("/")
-async def root():
-    return {"status": "Weather Chatbot API is running"}
 
-# ---------------- RUN SERVER ----------------
+
+# RUN SERVER 
 if __name__ == "__main__":
     import uvicorn
     port = int(os.getenv("PORT", 3000))

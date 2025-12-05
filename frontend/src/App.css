@@ -10,10 +10,7 @@ body {
   overflow-x: hidden;
 }
 
-
-
 .app-container {
-
   font-family: "Arimo", sans-serif;
   background: linear-gradient(135deg, #e4e6eb 0%, #e6e3e9 100%);
   min-height: 100vh;
@@ -39,16 +36,15 @@ body {
   padding: 0 40px;
 }
 
+/* Fixed mobile responsiveness - stack cards vertically */
 @media (max-width: 968px) {
   .content-wrapper {
-    grid-template-columns: 1fr;
+    flex-direction: column;
+    gap: 30px;
+    padding: 0 20px;
   }
-  
+
   .main-content {
     padding: 20px;
-  }
-  
-  .content-wrapper {
-    padding: 0 20px;
   }
 }
