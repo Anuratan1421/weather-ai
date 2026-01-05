@@ -34,8 +34,7 @@ function WeatherCard({ city, data, onCityChange, cities, selectedCity }) {
         <div className="weather-temp-row">
           <p className="weather-temp">{displayTemp()}°{unit}</p>
 
-          <div className="unit-toggle" role="tablist" aria-label="Temperature unit">
-            <button
+          <div className="unit-toggle" role="group" aria-label="Temperature unit">            <button
               className={`unit-btn ${unit === "C" ? "active" : ""}`}
               onClick={() => setUnit("C")}
               aria-pressed={unit === "C"}
