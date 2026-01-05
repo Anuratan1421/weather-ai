@@ -66,3 +66,27 @@ button:focus-visible {
     background-color: #f9f9f9;
   }
 }
+
+/* Theme toggle global styles */
+body.light-theme {
+  background: linear-gradient(135deg, #f4f7fb 0%, #ffffff 100%) !important;
+  color: #213547 !important;
+}
+
+body.light-theme .app-container {
+  background: linear-gradient(135deg, #f4f7fb 0%, #ffffff 100%) !important;
+  color: #213547 !important;
+}
+
+body.light-theme .theme-toggle {
+  background: linear-gradient(90deg, rgba(0,0,0,0.03), rgba(0,0,0,0.02));
+  border-color: rgba(0,0,0,0.06);
+}
+
+body.light-theme a {
+  color: #23df4c;
+}
+
+body.light-theme button {
+  background-color: #f9f9f9;
+}
