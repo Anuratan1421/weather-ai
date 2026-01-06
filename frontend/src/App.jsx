@@ -5,6 +5,7 @@ import "./App.css"
 import Header from "../components/Header"
 import WeatherCard from "../components/WeatherCard"
 import ChatCard from "../components/ChatCard"
+import WeatherBackground from "../components/WeatherBackground"
 
 function App() {
   const cities = ["Pune", "Mumbai", "Nagpur", "Delhi"]
@@ -32,6 +33,7 @@ function App() {
   
      
       <div className="app-container">
+        <WeatherBackground condition={weatherData.condition} />
         <Header /> 
         <main className="main-content">
           <div className="content-wrapper">
