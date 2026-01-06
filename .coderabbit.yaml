@@ -1,43 +1,26 @@
-# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
-
-language: "en-US"
-early_access: true
-
+language: en-US
+early_access: false
 reviews:
+  profile: chill
   request_changes_workflow: false
   high_level_summary: true
-  review_status: true
-  collapse_walkthrough: true
-
-  instructions: |
-    Please review this pull request and provide feedback on:
-    - Code quality and best practices
-    -industry standards compliance
-    - Potential bugs or issues
-    - Performance considerations
-    - Security concerns
-    - Test coverage and missing tests
-
-    Always point out:
-    - Unhandled error cases
-    - Edge cases
-    - Unsafe assumptions
-    - Missing validations
-
-    Be clear, direct, and constructive in your feedback.
-
-  path_filters:
-    - "!**/*.xml"
-
   auto_review:
     enabled: true
-    drafts: true
-    ignore_title_keywords:
-      - "WIP"
-    base_branches:
-      - "main"
-      - "develop"
-      - "feature/*"
-
-chat:
-  auto_reply: true
+  
+  # General review instructions
+  instructions:
+    - "Please review this pull request and provide feedback on:"
+    - "1. Code quality and best practices"
+    - "2. Potential bugs or issues"
+    - "3. Performance considerations"
+    - "4. Security concerns"
+    - "5. Test coverage"
+  
+  # Your existing path-based instructions
+  path_instructions:
+    - path: "src/**/*.js"
+      instructions: "Review JavaScript Code."
+    - path: "src/**/*.jsx"
+      instructions: "Review ReactJs Code."
+    - path: "src/**/*.ts"
+      instructions: "Review TypeScript Code."
