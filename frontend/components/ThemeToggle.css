@@ -17,14 +17,3 @@
   font-size: 0.9rem;
   opacity: 0.9;
 }
-
-/* Light theme helper */
-body.light-theme {
-  background: linear-gradient(135deg, #f4f7fb 0%, #ffffff 100%);
-  color: #213547;
-}
-
-body.light-theme .theme-toggle {
-  background: linear-gradient(90deg, rgba(0,0,0,0.03), rgba(0,0,0,0.02));
-  border-color: rgba(0,0,0,0.06);
-}

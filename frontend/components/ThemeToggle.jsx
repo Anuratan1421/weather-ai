@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react"
+import { useEffect, useState, useRef } from "react"
 import "./ThemeToggle.css"
 
 function ThemeToggle() {
@@ -9,9 +9,23 @@ function ThemeToggle() {
       return "dark"
     }
   })
+  
+  const isInitialMount = useRef(true)
 
   useEffect(() => {
-    document.body.classList.toggle("light-theme", theme === "light")
+    // Skip on initial mount since the inline script already applied the theme
+    if (isInitialMount.current) {
+      isInitialMount.current = false
+      return
+    }
+    
+    // Apply or remove light-theme class based on current theme
+    if (theme === "light") {
+      document.body.classList.add("light-theme")
+    } else {
+      document.body.classList.remove("light-theme")
+    }
+    
     try {
       localStorage.setItem("theme", theme)
     } catch (e) {}
