@@ -2,6 +2,9 @@
 import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
+import { randomUUID } from "crypto";
+import { EventEmitter } from "events";
+import mongoose from "mongoose";
 
 import { ChatOpenAI } from "@langchain/openai";
 import { tool } from "langchain";
@@ -20,13 +23,49 @@ app.use(cors());
 app.use(express.json());
 app.use(express.static("public")); // serve frontend
 
+// ---------------- MONGODB CONNECTION ----------------
+mongoose.connect(process.env.MONGO_URI)
+  .then(() => console.log('✅ MongoDB connected'))
+  .catch(err => console.error('❌ MongoDB connection error:', err));
+
+// ---------------- MONGODB SCHEMA ----------------
+const conversationSchema = new mongoose.Schema({
+  conversationId: { type: String, required: true, unique: true, index: true },
+  messages: [{
+    type: { type: String, enum: ['user', 'bot'], required: true },
+    text: { type: String, required: true },
+    timestamp: { type: Date, default: Date.now }
+  }],
+  history: [{
+    type: { type: String, enum: ['human', 'ai'], required: true },
+    text: { type: String, required: true }
+  }],
+  lastCity: { type: String, default: null },
+  title: { type: String, default: 'New Chat' },
+  createdAt: { type: Date, default: Date.now },
+  lastActivity: { type: Date, default: Date.now }
+});
+
+const Conversation = mongoose.model('Conversation', conversationSchema);
+
+// ---------------- CONVERSATION STORAGE ----------------
+// In-memory cache for active conversations (for quick access)
+const conversationCache = new Map();
+
+// EventEmitter for broadcasting to multiple clients
+const conversationEvents = new EventEmitter();
+conversationEvents.setMaxListeners(100); // Support many concurrent connections
+
+// Track SSE clients per conversation
+const conversationClients = new Map(); // conversationId -> Set of response objects
+
 // ---------------- LLM SETUP ----------------
 const llm = new ChatOpenAI({
   model: "gpt-4o-mini",
   temperature: 0.4,
   maxTokens: 1024,
   configuration: {
-    apiKey: process.env.OPENROUTER_KEY ,
+    apiKey: process.env.OPENROUTER_API_KEY ,
     baseURL: "https://openrouter.ai/api/v1",
     defaultHeaders: {
       "HTTP-Referer":  "http://localhost:3000",
@@ -114,80 +153,313 @@ const llmWithTools = llm.bindTools([getWeatherTool]);
 
 // ---------------- SYSTEM PROMPT ----------------
 const SYSTEM_PROMPT = `
-You are a smart Weather AI inside a chat system.
+You are a helpful and knowledgeable AI assistant with weather capabilities.
 
 RULES:
-- When user asks for forecast or future weather, call tool with type="forecast".
-- When user asks for current weather, call tool with type="current".
-- Answer based only on weather context.
-- You may give simple weather-related lifestyle suggestions if and only if user asks for them.
-- Do NOT ask the user to ask something else or say things like "just ask".
-- Do NOT ask unnecessary clarification questions unless no city has been mentioned at all.
-- Remember the last city unless the user changes it.
-- Keep responses short and direct.
-- Do NOT talk about anything unrelated to weather.
+1. Use the get_weather tool to look up weather information when the user asks about current weather or forecasts.
+2. If the user asks for a forecast, use the "forecast" type parameter.
+3. You can answer ANY question on ANY topic - weather, stories, facts, advice, explanations, creative writing, etc.
+4. ALWAYS provide direct, complete answers. NEVER ask clarifying questions like "What topic would you like?" or "Do you have a preference?"
+5. If asked for a story, creative content, or open-ended request, immediately generate engaging, detailed content without hesitation.
+6. Be conversational, helpful, and comprehensive in your responses.
+7. For creative requests (stories, poems, etc.), make them long, detailed, and engaging.
 `;
 
-// ---------------- CHAT ENDPOINT ----------------
-app.post("/api/chat", async (req, res) => {
+// ---------------- CREATE NEW CONVERSATION ----------------
+app.post("/api/conversations", async (req, res) => {
   try {
-    const userMessage = (req.body?.message || "").toString().trim();
-    const history = req.body?.history || [];
-    let lastCity = req.body?.lastCity || null;
-
-    if (!userMessage) return res.status(400).json({ error: "message required" });
-
-    // Rebuild previous messages
-    const messages = [new SystemMessage(SYSTEM_PROMPT), ...history.map((m) =>
-      m.type === "human"
-        ? new HumanMessage(m.text)
-        : new AIMessage(m.text)
-    )];
-
-    messages.push(new HumanMessage(userMessage));
-
-    let aiMessage = await llmWithTools.invoke(messages);
-    messages.push(aiMessage);
-
-    while (aiMessage.tool_calls && aiMessage.tool_calls.length > 0) {
-      for (const toolCall of aiMessage.tool_calls) {
-        if (toolCall.name === "get_weather") {
-          lastCity = toolCall.args.city;
-          const toolResult = await getWeatherTool.invoke(toolCall.args);
-
-          messages.push(
-            new ToolMessage({
-              tool_call_id: toolCall.id,
-              content: toolResult,
-            })
-          );
-        }
-      }
-      aiMessage = await llmWithTools.invoke(messages);
-      messages.push(aiMessage);
-    }
-
-    const reply =
-      typeof aiMessage.content === "string"
-        ? aiMessage.content
-        : aiMessage.content.map((c) => c.text || "").join(" ");
-
-    const newHistory = [
-      ...history,
-      { type: "human", text: userMessage },
-      { type: "ai", text: reply },
-    ];
-
-    return res.json({
-      reply,
-      history: newHistory,
-      lastCity,
+    const conversationId = randomUUID();
+    const newConversation = new Conversation({
+      conversationId,
+      messages: [],
+      history: [],
+      lastCity: null,
+      title: "New Chat",
+      createdAt: new Date(),
+      lastActivity: new Date()
     });
+    await newConversation.save();
+    res.json({ conversationId });
   } catch (error) {
-    console.error("Chat error:", error);
-    return res.status(500).json({ error: "Internal error" });
+    console.error('Error creating conversation:', error);
+    res.status(500).json({ error: 'Failed to create conversation' });
   }
 });
+
+// ---------------- GET CONVERSATION ----------------
+app.get("/api/conversations/:id", async (req, res) => {
+  try {
+    const conversation = await Conversation.findOne({ conversationId: req.params.id });
+    if (!conversation) {
+      return res.status(404).json({ error: "Conversation not found" });
+    }
+    res.json({
+      id: conversation.conversationId,
+      messages: conversation.messages,
+      history: conversation.history,
+      lastCity: conversation.lastCity,
+      title: conversation.title,
+      createdAt: conversation.createdAt,
+      lastActivity: conversation.lastActivity
+    });
+  } catch (error) {
+    console.error('Error fetching conversation:', error);
+    res.status(500).json({ error: 'Failed to fetch conversation' });
+  }
+});
+
+// ---------------- LIST CONVERSATIONS ----------------
+app.get("/api/conversations", async (req, res) => {
+  try {
+    const allConversations = await Conversation.find()
+      .sort({ lastActivity: -1 })
+      .select('conversationId title lastActivity messages')
+      .lean();
+    
+    res.json(allConversations.map(c => ({
+      id: c.conversationId,
+      title: c.title,
+      lastActivity: c.lastActivity,
+      messageCount: c.messages?.length || 0
+    })));
+  } catch (error) {
+    console.error('Error listing conversations:', error);
+    res.status(500).json({ error: 'Failed to list conversations' });
+  }
+});
+
+// ---------------- STREAM CONVERSATION UPDATES (SSE) ----------------
+app.get("/api/stream/:conversationId", (req, res) => {
+  const conversationId = req.params.conversationId;
+
+  // SSE headers
+  res.setHeader("Content-Type", "text/event-stream");
+  res.setHeader("Cache-Control", "no-cache");
+  res.setHeader("Connection", "keep-alive");
+  res.setHeader("X-Accel-Buffering", "no");
+  res.flushHeaders();
+
+  // Add this client to the conversation's client list
+  if (!conversationClients.has(conversationId)) {
+    conversationClients.set(conversationId, new Set());
+  }
+  conversationClients.get(conversationId).add(res);
+
+  // Send initial connection event
+  res.write(`data: ${JSON.stringify({ type: "connected", conversationId })}\n\n`);
+
+  // Set up event listeners for this conversation
+  const messageHandler = (data) => {
+    try {
+      res.write(`data: ${JSON.stringify({ type: "message", message: data.message })}\n\n`);
+    } catch (err) {
+      console.error("Error writing message:", err);
+    }
+  };
+
+  const tokenHandler = (data) => {
+    try {
+      res.write(`data: ${JSON.stringify({ type: "token", content: data.content, messageId: data.messageId })}\n\n`);
+    } catch (err) {
+      console.error("Error writing token:", err);
+    }
+  };
+
+  const statusHandler = (data) => {
+    try {
+      res.write(`data: ${JSON.stringify({ type: "status", content: data.content })}\n\n`);
+    } catch (err) {
+      console.error("Error writing status:", err);
+    }
+  };
+
+  const doneHandler = (data) => {
+    try {
+      res.write(`data: ${JSON.stringify({ type: "done", messageId: data.messageId })}\n\n`);
+    } catch (err) {
+      console.error("Error writing done:", err);
+    }
+  };
+
+  conversationEvents.on(`${conversationId}:message`, messageHandler);
+  conversationEvents.on(`${conversationId}:token`, tokenHandler);
+  conversationEvents.on(`${conversationId}:status`, statusHandler);
+  conversationEvents.on(`${conversationId}:done`, doneHandler);
+
+  // Send heartbeat every 30 seconds to keep connection alive
+  const heartbeat = setInterval(() => {
+    try {
+      res.write(`: heartbeat\n\n`);
+    } catch (err) {
+      clearInterval(heartbeat);
+    }
+  }, 30000);
+
+  // Clean up on client disconnect
+  req.on("close", () => {
+    clearInterval(heartbeat);
+    conversationEvents.off(`${conversationId}:message`, messageHandler);
+    conversationEvents.off(`${conversationId}:token`, tokenHandler);
+    conversationEvents.off(`${conversationId}:status`, statusHandler);
+    conversationEvents.off(`${conversationId}:done`, doneHandler);
+    
+    const clients = conversationClients.get(conversationId);
+    if (clients) {
+      clients.delete(res);
+      if (clients.size === 0) {
+        conversationClients.delete(conversationId);
+      }
+    }
+  });
+});
+
+// ---------------- CHAT ENDPOINT (JSON POST) ----------------
+app.post("/api/chat/:conversationId", async (req, res) => {
+  const conversationId = req.params.conversationId;
+  
+  try {
+    const userMessage = String(req.body?.message || "").trim();
+
+    if (!userMessage) {
+      return res.status(400).json({ error: "message required" });
+    }
+
+    // Get or create conversation from MongoDB
+    let conversation = await Conversation.findOne({ conversationId });
+    if (!conversation) {
+      conversation = new Conversation({
+        conversationId,
+        messages: [],
+        history: [],
+        lastCity: null,
+        title: userMessage.substring(0, 50),
+        createdAt: new Date(),
+        lastActivity: new Date()
+      });
+    }
+
+    conversation.lastActivity = new Date();
+
+    // Add user message to DB
+    const userMsgId = Date.now();
+    const userMsg = { type: "user", text: userMessage, timestamp: new Date() };
+    conversation.messages.push(userMsg);
+    await conversation.save();
+
+    // Broadcast user message to all connected clients IMMEDIATELY
+    conversationEvents.emit(`${conversationId}:message`, {
+      message: { type: "user", text: userMessage, id: userMsgId }
+    });
+
+    // Broadcast processing status immediately
+    conversationEvents.emit(`${conversationId}:status`, {
+      content: "processing"
+    });
+
+    // Send immediate response to poster
+    res.json({ success: true, conversationId, messageId: userMsgId });
+
+    // Process AI response in background (non-blocking)
+    setImmediate(async () => {
+      try {
+        // Build LangChain messages
+        const messages = [new SystemMessage(SYSTEM_PROMPT)];
+
+        for (const m of conversation.history) {
+          if (m.type === "human") messages.push(new HumanMessage(m.text));
+          if (m.type === "ai") messages.push(new AIMessage(m.text));
+        }
+
+        messages.push(new HumanMessage(userMessage));
+
+        // STEP 1: TOOL DECISION (NO STREAMING)
+        let aiMessage = await llmWithTools.invoke(messages);
+        messages.push(aiMessage);
+
+        // STEP 2: HANDLE TOOL CALLS
+        if (aiMessage.tool_calls?.length) {
+          for (const call of aiMessage.tool_calls) {
+            if (call.name === "get_weather") {
+              conversation.lastCity = call.args.city;
+
+              // Broadcast status to all connected clients
+              conversationEvents.emit(`${conversationId}:status`, {
+                content: "Fetching weather data...",
+              });
+
+              const toolResult = await getWeatherTool.invoke(call.args);
+
+              messages.push(
+                new ToolMessage({
+                  tool_call_id: call.id,
+                  content: toolResult,
+                })
+              );
+            }
+          }
+        }
+
+        // Broadcast that streaming is starting
+        conversationEvents.emit(`${conversationId}:status`, {
+          content: "generating"
+        });
+
+        // STEP 3: STREAM FINAL RESPONSE
+        const messageId = Date.now();
+        const finalStream = await llm.stream(messages);
+        let fullReply = "";
+
+        for await (const chunk of finalStream) {
+          if (!chunk.content) continue;
+
+          const text =
+            typeof chunk.content === "string"
+              ? chunk.content
+              : chunk.content.map((c) => c.text || "").join("");
+
+          if (text) {
+            fullReply += text;
+            
+            // Broadcast token to all connected clients
+            conversationEvents.emit(`${conversationId}:token`, {
+              content: text,
+              messageId
+            });
+          }
+        }
+
+        // Safety fallback
+        if (!fullReply.trim()) {
+          fullReply = "Here's the weather information you requested 🌦";
+        }
+
+        // Update conversation in DB
+        conversation.messages.push({ type: "bot", text: fullReply, timestamp: new Date() });
+        conversation.history.push({ type: "human", text: userMessage });
+        conversation.history.push({ type: "ai", text: fullReply });
+        await conversation.save();
+
+        // Broadcast completion to all connected clients
+        conversationEvents.emit(`${conversationId}:done`, {
+          messageId
+        });
+
+      } catch (error) {
+        console.error("AI processing error:", error);
+        conversationEvents.emit(`${conversationId}:message`, {
+          message: { type: "bot", text: "Sorry, an error occurred.", id: Date.now() }
+        });
+        conversationEvents.emit(`${conversationId}:done`, {
+          messageId: Date.now()
+        });
+      }
+    });
+
+  } catch (error) {
+    console.error("Chat error:", error);
+    res.status(500).json({ error: "Internal server error" });
+  }
+}); 
 
 
 // ---------------- WEATHER CARD API ----------------

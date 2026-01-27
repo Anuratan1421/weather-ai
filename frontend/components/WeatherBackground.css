@@ -1,0 +1,69 @@
+.weather-bg {
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  overflow: hidden;
+}
+
+.weather-bg__layer.weather-bg__sky {
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(180deg, rgba(36,36,36,0.12), rgba(36,36,36,0.02));
+  transition: background 0.6s ease;
+}
+
+.weather-bg--sun .weather-bg__sky {
+  background: linear-gradient(180deg, #f7f9fb, #eaf6ff);
+}
+
+.weather-bg--clouds .weather-bg__sky {
+  background: linear-gradient(180deg, #eef3f8, #e6eef8);
+}
+
+.weather-bg--rain .weather-bg__sky,
+.weather-bg--storm .weather-bg__sky {
+  background: linear-gradient(180deg, #dfe9f3, #c7d7ea);
+}
+
+.sun {
+  position: absolute;
+  right: 6%;
+  top: 8%;
+  width: 120px;
+  height: 120px;
+}
+
+.sun-core {
+  position: absolute;
+  width: 100%;
+  height: 100%;
+  background: radial-gradient(circle at 30% 30%, #fff59d, #ffd54f);
+  border-radius: 50%;
+  filter: blur(2px);
+}
+
+.clouds .cloud {
+  position: absolute;
+  background: #ffffff;
+  border-radius: 40px;
+  opacity: 0.9;
+  filter: drop-shadow(0 8px 20px rgba(0,0,0,0.08));
+}
+.clouds .c1 { width: 220px; height: 70px; left: 6%; top: 12%; }
+.clouds .c2 { width: 160px; height: 52px; left: 18%; top: 6%; opacity: 0.85 }
+.clouds .c3 { width: 140px; height: 50px; left: 28%; top: 18%; opacity: 0.8 }
+
+.rain .drops { position: absolute; left: 0; top: 80px; width: 100%; display:flex; flex-wrap:wrap; gap:10px; padding: 0 6% }
+.rain .drop { width:2px; height:14px; background: linear-gradient(180deg,#9fd3ff, #2f9fe3); border-radius:2px; opacity:0.9; animation: drop 0.9s linear infinite }
+.rain .drop.d0 { animation-delay: 0s }
+.rain .drop.d1 { animation-delay: 0.1s }
+.rain .drop.d2 { animation-delay: 0.2s }
+.rain .drop.d3 { animation-delay: 0.3s }
+.rain .drop.d4 { animation-delay: 0.4s }
+.rain .drop.d5 { animation-delay: 0.5s }
+
+@keyframes drop { 0% { transform: translateY(-8px); opacity: .8 } 100% { transform: translateY(12px); opacity: 0 } }
+
+.storm .strike { position:absolute; left:28%; top:90px; width:24px; height:90px; background: linear-gradient(180deg,#fff, #ffd54f); transform: skew(-10deg) rotate(12deg); box-shadow: 0 0 22px rgba(255,240,160,0.8); animation: flash 2s infinite }
+@keyframes flash { 0% { opacity: 0 } 45% { opacity: 1 } 55% { opacity: 1 } 100% { opacity: 0 } }
