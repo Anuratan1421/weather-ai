@@ -66,16 +66,46 @@ function ChatCard({ conversationId, onFirstMessage }) {
       } finally {
         setIsLoading(false);
       }
-
-      // Handle pending message from navigation state
-      const pendingMessage = location.state?.pendingMessage;
-      if (pendingMessage && !pendingMessageSentRef.current) {
-        pendingMessageSentRef.current = true;
-        setTimeout(() => sendMessage(pendingMessage), 100);
-      }
     };
 
     loadConversation();
+  }, [conversationId]); // Only reload when conversationId changes
+
+  // Handle pending message separately
+  useEffect(() => {
+    const pendingMessage = location.state?.pendingMessage;
+    if (pendingMessage && conversationId && !pendingMessageSentRef.current) {
+      pendingMessageSentRef.current = true;
+      // Use inline function to avoid dependency on sendMessage
+      setTimeout(() => {
+        const send = async () => {
+          const tempId = Date.now();
+          setMessages((prev) => [...prev, { id: tempId, type: "user", text: pendingMessage }]);
+          setIsTyping(true);
+          
+          try {
+            const res = await fetch(`${API_BASE}/api/chat/${conversationId}`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ message: pendingMessage }),
+            });
+            
+            if (!res.ok) throw new Error(`HTTP ${res.status}`);
+            const result = await res.json();
+            console.log('✅ Pending message sent:', result.conversationId);
+          } catch (err) {
+            console.error('❌ Send error:', err);
+            setIsTyping(false);
+            setMessages((prev) => prev.filter(m => m.id !== tempId));
+            setMessages((prev) => [...prev, { 
+              id: Date.now(), type: "bot", 
+              text: `Error: ${err.message || 'Server unavailable'}` 
+            }]);
+          }
+        };
+        send();
+      }, 100);
+    }
   }, [conversationId, location.state?.pendingMessage]);
 
   // Set up SSE connection for real-time updates
