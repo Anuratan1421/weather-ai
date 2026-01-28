@@ -36,15 +36,48 @@ body {
   padding: 0 40px;
 }
 
-/* Fixed mobile responsiveness - stack cards vertically */
+.content-wrapper.chat-only {
+  justify-content: center;
+  max-width: 1200px;
+  margin: 0 auto;
+}
+
+/* Tablet and below - stack cards vertically */
+@media (max-width: 1200px) {
+  .content-wrapper {
+    gap: 60px;
+    padding: 0 20px;
+  }
+}
+
 @media (max-width: 968px) {
   .content-wrapper {
     flex-direction: column;
     gap: 30px;
-    padding:  20px;
+    padding: 0 20px;
+  }
+
+  .content-wrapper.chat-only {
+    padding: 0 15px;
   }
 
   .main-content {
-    padding: 20px;
+    padding: 20px 10px;
+  }
+}
+
+/* Mobile devices */
+@media (max-width: 480px) {
+  .content-wrapper {
+    gap: 20px;
+    padding: 0 10px;
+  }
+
+  .main-content {
+    padding: 15px 5px;
+  }
+
+  .app-container {
+    min-height: 100dvh; /* Use dynamic viewport height for mobile */
   }
 }
