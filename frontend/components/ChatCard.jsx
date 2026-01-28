@@ -71,42 +71,7 @@ function ChatCard({ conversationId, onFirstMessage }) {
     loadConversation();
   }, [conversationId]); // Only reload when conversationId changes
 
-  // Handle pending message separately
-  useEffect(() => {
-    const pendingMessage = location.state?.pendingMessage;
-    if (pendingMessage && conversationId && !pendingMessageSentRef.current) {
-      pendingMessageSentRef.current = true;
-      // Use inline function to avoid dependency on sendMessage
-      setTimeout(() => {
-        const send = async () => {
-          const tempId = Date.now();
-          setMessages((prev) => [...prev, { id: tempId, type: "user", text: pendingMessage }]);
-          setIsTyping(true);
-          
-          try {
-            const res = await fetch(`${API_BASE}/api/chat/${conversationId}`, {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ message: pendingMessage }),
-            });
-            
-            if (!res.ok) throw new Error(`HTTP ${res.status}`);
-            const result = await res.json();
-            console.log('✅ Pending message sent:', result.conversationId);
-          } catch (err) {
-            console.error('❌ Send error:', err);
-            setIsTyping(false);
-            setMessages((prev) => prev.filter(m => m.id !== tempId));
-            setMessages((prev) => [...prev, { 
-              id: Date.now(), type: "bot", 
-              text: `Error: ${err.message || 'Server unavailable'}` 
-            }]);
-          }
-        };
-        send();
-      }, 100);
-    }
-  }, [conversationId, location.state?.pendingMessage]);
+  // Don't auto-send pending messages - they're already sent before navigation
 
   // Set up SSE connection for real-time updates
   useEffect(() => {
@@ -142,12 +107,15 @@ function ChatCard({ conversationId, onFirstMessage }) {
 
           if (data.type === "message") {
             setMessages((prev) => {
+              // Better deduplication - check exact text and type match
               const exists = prev.some(m => 
                 m.text === data.message.text && 
-                m.type === data.message.type &&
-                Math.abs((m.id || 0) - (data.message.id || 0)) < 2000
+                m.type === data.message.type
               );
-              if (exists) return prev;
+              if (exists) {
+                console.log('⚠️ Duplicate message ignored:', data.message.text.substring(0, 30));
+                return prev;
+              }
               
               return [...prev, {
                 id: data.message.id || Date.now(),
@@ -262,19 +230,19 @@ function ChatCard({ conversationId, onFirstMessage }) {
     const userText = input
     setInput("")
 
-    // If no conversationId exists (first message), create one
+    // If no conversationId exists (first message), create one and send message
     if (!conversationId && onFirstMessage) {
       try {
-        await onFirstMessage(userText);
+        const newConversationId = await onFirstMessage(userText);
+        if (!newConversationId) {
+          throw new Error('Failed to create conversation');
+        }
+        // Message will be sent via sendMessage after navigation completes
         return;
       } catch (error) {
         console.error("Error creating conversation:", error);
         setInput(userText); // Restore input
-        setMessages((prev) => [...prev, { 
-          id: Date.now(), 
-          type: "bot", 
-          text: "Failed to create conversation. Please try again." 
-        }]);
+        alert('Failed to create conversation. Please try again.');
         return;
       }
     }

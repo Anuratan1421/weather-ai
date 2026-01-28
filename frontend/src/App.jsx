@@ -55,7 +55,7 @@ function ChatInterface() {
     }
   };
 
-  // Handler for first message - creates conversation and navigates to UUID route
+  // Handler for first message - creates conversation, navigates, and sends message
   const handleFirstMessage = async (message) => {
     if (!conversationId) {
       try {
@@ -81,11 +81,21 @@ function ChatInterface() {
         
         const newConversationId = data.conversationId;
         
-        // Navigate to the new conversation route with state containing the message
-        navigate(`/c/${newConversationId}`, { 
-          replace: true, 
-          state: { pendingMessage: message } 
-        });
+        // Navigate to new conversation
+        navigate(`/c/${newConversationId}`, { replace: true });
+        
+        // Send the message after navigation
+        setTimeout(async () => {
+          try {
+            await fetch(`https://sanch-ai.vercel.app/api/chat/${newConversationId}`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ message }),
+            });
+          } catch (err) {
+            console.error('Failed to send first message:', err);
+          }
+        }, 500);
         
         return newConversationId;
       } catch (error) {
