@@ -32,6 +32,36 @@
   margin: 0;
 }
 
+.weather-temp-row {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  justify-content: center;
+}
+
+.unit-toggle {
+  display: inline-flex;
+  gap: 8px;
+  background: rgba(0,0,0,0.03);
+  padding: 6px;
+  border-radius: 12px;
+}
+
+.unit-btn {
+  border: none;
+  background: transparent;
+  padding: 6px 10px;
+  border-radius: 8px;
+  cursor: pointer;
+  font-weight: 700;
+  color: #444;
+}
+
+.unit-btn.active {
+  background: linear-gradient(135deg, #46ba53 0%, #64d871d8 100%);
+  color: white;
+}
+
 .weather-condition {
   text-align: center;
   font-size: 18px;

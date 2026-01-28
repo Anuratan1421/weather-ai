@@ -1,0 +1,26 @@
+language: en-US
+early_access: false
+reviews:
+  profile: chill
+  request_changes_workflow: false
+  high_level_summary: true
+  auto_review:
+    enabled: true
+  
+  # General review instructions
+  instructions:
+    - "Please review this pull request and provide feedback on:"
+    - "1. Code quality and best practices"
+    - "2. Potential bugs or issues"
+    - "3. Performance considerations"
+    - "4. Security concerns"
+    - "5. Test coverage"
+  
+  # Your existing path-based instructions
+  path_instructions:
+    - path: "src/**/*.js"
+      instructions: "Review JavaScript Code."
+    - path: "src/**/*.jsx"
+      instructions: "Review ReactJs Code."
+    - path: "src/**/*.ts"
+      instructions: "Review TypeScript Code."
