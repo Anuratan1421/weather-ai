@@ -7,7 +7,7 @@ import Header from "../components/Header"
 import WeatherCard from "../components/WeatherCard"
 import ChatCard from "../components/ChatCard"
 
-function ChatPage() {
+function ChatInterface() {
   const navigate = useNavigate();
   const { conversationId } = useParams();
   const cities = ["Pune", "Mumbai", "Nagpur", "Delhi"];
@@ -19,7 +19,7 @@ function ChatPage() {
   const fetchWeather = async (city) => {
     setLoading(true);
     try {
-      const res = await fetch(`http://localhost:3000/api/weather?city=${city}`);
+      const res = await fetch(`https://sanch-ai.vercel.app/api/weather?city=${city}`);
       const data = await res.json();
       setWeatherData(data);
     } catch (error) {
@@ -34,14 +34,67 @@ function ChatPage() {
 
   const handleNewChat = async () => {
     try {
-      const res = await fetch("http://localhost:3000/api/conversations", {
+      const res = await fetch("https://sanch-ai.vercel.app/api/conversations", {
         method: "POST"
       });
+      
+      if (!res.ok) {
+        throw new Error(`HTTP error! status: ${res.status}`);
+      }
+      
       const data = await res.json();
+      
+      if (!data.conversationId) {
+        throw new Error("No conversation ID returned from server");
+      }
+      
       navigate(`/c/${data.conversationId}`);
     } catch (error) {
       console.error("Error creating conversation:", error);
+      alert("Failed to create new chat. Please check if the backend is running.");
     }
+  };
+
+  // Handler for first message - creates conversation and navigates to UUID route
+  const handleFirstMessage = async (message) => {
+    if (!conversationId) {
+      try {
+        const res = await fetch("https://sanch-ai.vercel.app/api/conversations", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json"
+          }
+        });
+        
+        if (!res.ok) {
+          const errorText = await res.text();
+          console.error("Server response:", errorText);
+          throw new Error(`HTTP error! status: ${res.status}`);
+        }
+        
+        const data = await res.json();
+        
+        if (!data.conversationId) {
+          console.error("Invalid response:", data);
+          throw new Error("No conversation ID returned from server");
+        }
+        
+        const newConversationId = data.conversationId;
+        
+        // Navigate to the new conversation route with state containing the message
+        navigate(`/c/${newConversationId}`, { 
+          replace: true, 
+          state: { pendingMessage: message } 
+        });
+        
+        return newConversationId;
+      } catch (error) {
+        console.error("Error creating conversation:", error);
+        alert("Failed to create conversation. Backend server may be experiencing issues. Please try again.");
+        return null;
+      }
+    }
+    return conversationId;
   };
 
   return (
@@ -69,6 +122,7 @@ function ChatPage() {
             city={selectedCity} 
             weatherData={weatherData}
             fullWidth={chatOnlyMode}
+            onFirstMessage={handleFirstMessage}
           />
         </div>
       </main>
@@ -77,30 +131,10 @@ function ChatPage() {
 }
 
 function App() {
-  const navigate = useNavigate();
-
-  useEffect(() => {
-    // Redirect root to new conversation
-    if (window.location.pathname === "/") {
-      const createInitialConversation = async () => {
-        try {
-          const res = await fetch("http://localhost:3000/api/conversations", {
-            method: "POST"
-          });
-          const data = await res.json();
-          navigate(`/c/${data.conversationId}`, { replace: true });
-        } catch (error) {
-          console.error("Error creating conversation:", error);
-        }
-      };
-      createInitialConversation();
-    }
-  }, [navigate]);
-
   return (
     <Routes>
-      <Route path="/c/:conversationId" element={<ChatPage />} />
-      <Route path="/" element={<div>Loading...</div>} />
+      <Route path="/c/:conversationId" element={<ChatInterface />} />
+      <Route path="/" element={<ChatInterface />} />
     </Routes>
   );
 }
