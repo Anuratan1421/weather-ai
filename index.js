@@ -25,9 +25,43 @@ app.use(express.json());
 app.use(express.static("public")); // serve frontend
 
 // ---------------- MONGODB CONNECTION ----------------
-mongoose.connect(process.env.MONGO_URI)
-  .then(() => console.log('✅ MongoDB connected'))
-  .catch(err => console.error('❌ MongoDB connection error:', err));
+// Optimized for Vercel Serverless - minimal pooling
+const connectDB = async () => {
+  try {
+    await mongoose.connect(process.env.MONGO_URI, {
+      serverSelectionTimeoutMS: 5000,
+      socketTimeoutMS: 45000,
+      // Serverless-friendly: no pooling, single connection per instance
+      maxPoolSize: 1,
+    });
+    console.log('✅ MongoDB connected');
+  } catch (err) {
+    console.error('❌ MongoDB connection error:', err);
+    // Retry connection after 5 seconds
+    setTimeout(connectDB, 5000);
+  }
+};
+
+mongoose.connection.on('disconnected', () => {
+  console.log('⚠️ MongoDB disconnected. Attempting to reconnect...');
+});
+
+mongoose.connection.on('error', (err) => {
+  console.error('❌ MongoDB error:', err);
+});
+
+connectDB();
+
+// Helper to check DB connection
+const checkDBConnection = (req, res, next) => {
+  if (mongoose.connection.readyState !== 1) {
+    return res.status(503).json({ 
+      error: 'Database unavailable', 
+      message: 'MongoDB is not connected. Please try again.' 
+    });
+  }
+  next();
+};
 
 // ---------------- REDIS CONNECTION ----------------
 const redisClient = createClient({
@@ -182,7 +216,7 @@ RULES:
 `;
 
 // ---------------- CREATE NEW CONVERSATION ----------------
-app.post("/api/conversations", async (req, res) => {
+app.post("/api/conversations", checkDBConnection, async (req, res) => {
   try {
     const conversationId = randomUUID();
     const newConversation = new Conversation({
@@ -194,18 +228,23 @@ app.post("/api/conversations", async (req, res) => {
       createdAt: new Date(),
       lastActivity: new Date()
     });
+    
     await newConversation.save();
+    console.log('✅ Created conversation:', conversationId);
     res.json({ conversationId });
   } catch (error) {
-    console.error('Error creating conversation:', error);
-    res.status(500).json({ error: 'Failed to create conversation' });
+    console.error('❌ Error creating conversation:', error);
+    res.status(500).json({ 
+      error: 'Failed to create conversation',
+      message: error.message 
+    });
   }
 });
 
 // ---------------- GET CONVERSATION ----------------
-app.get("/api/conversations/:id", async (req, res) => {
+app.get("/api/conversations/:id", checkDBConnection, async (req, res) => {
   try {
-    const conversation = await Conversation.findOne({ conversationId: req.params.id });
+    const conversation = await Conversation.findOne({ conversationId: req.params.id }).lean();
     if (!conversation) {
       return res.status(404).json({ error: "Conversation not found" });
     }
@@ -225,7 +264,7 @@ app.get("/api/conversations/:id", async (req, res) => {
 });
 
 // ---------------- LIST CONVERSATIONS ----------------
-app.get("/api/conversations", async (req, res) => {
+app.get("/api/conversations", checkDBConnection, async (req, res) => {
   try {
     const allConversations = await Conversation.find()
       .sort({ lastActivity: -1 })
@@ -247,15 +286,16 @@ app.get("/api/conversations", async (req, res) => {
 // ---------------- STREAM CONVERSATION UPDATES (SSE) ----------------
 app.get("/api/stream/:conversationId", async (req, res) => {
   const conversationId = req.params.conversationId;
-  const lastEventId = req.headers['last-event-id']; // Browser sends this automatically on reconnect
+  const lastEventId = req.headers['last-event-id'];
 
-  console.log(`📡 Stream request for ${conversationId}, Last-Event-ID: ${lastEventId || 'none'}`);
+  console.log(`📡 SSE: ${conversationId} | Last-Event-ID: ${lastEventId || 'new'}`);
 
-  // SSE headers
+  // Set SSE headers
   res.setHeader("Content-Type", "text/event-stream");
-  res.setHeader("Cache-Control", "no-cache");
+  res.setHeader("Cache-Control", "no-cache, no-transform");
   res.setHeader("Connection", "keep-alive");
   res.setHeader("X-Accel-Buffering", "no");
+  res.setHeader("Access-Control-Allow-Origin", "*");
   res.flushHeaders();
 
   // Add this client to the conversation's client list
@@ -264,131 +304,88 @@ app.get("/api/stream/:conversationId", async (req, res) => {
   }
   conversationClients.get(conversationId).add(res);
 
-  // RECONNECTION LOGIC: If Last-Event-ID present, replay missed events
+  // Handle reconnection - replay missed events from Redis
+  const streamKey = `stream:${conversationId}`;
+  
   if (lastEventId) {
     try {
-      console.log(`🔄 Reconnection detected for ${conversationId}, last event: ${lastEventId}`);
-      
-      // Get all events after lastEventId from Redis Stream
-      const streamKey = `stream:${conversationId}`;
-      
-      // First, check if stream exists and get some info
-      try {
-        const streamInfo = await redisClient.xLen(streamKey);
-        console.log(`📊 Stream ${streamKey} has ${streamInfo} total events`);
-      } catch (e) {
-        console.log(`⚠️ Stream might not exist: ${e.message}`);
-      }
-      
-      // Use xRange to get all events after lastEventId
+      console.log(`🔄 Reconnect: replaying from ${lastEventId}`);
       const events = await redisClient.xRange(streamKey, `(${lastEventId}`, '+');
       
-      if (events && events.length > 0) {
-        console.log(`✅ Found ${events.length} missed events, replaying...`);
-        
+      if (events?.length > 0) {
+        console.log(`✅ Replaying ${events.length} events`);
         for (const event of events) {
-          const eventId = event.id;
           const data = JSON.parse(event.message.data);
-          
-          console.log(`  📤 Replaying: ${data.type} [${eventId}]`);
-          
-          // Replay event with original ID
-          res.write(`id: ${eventId}\n`);
-          res.write(`data: ${JSON.stringify(data)}\n\n`);
+          res.write(`id: ${event.id}\ndata: ${JSON.stringify(data)}\n\n`);
         }
-        
-        console.log(`✅ Replayed ${events.length} missed events`);
-      } else {
-        console.log(`ℹ️ No missed events found after ${lastEventId}`);
-        // Don't send a new connected event on reconnect if stream is done
       }
     } catch (err) {
-      console.error('❌ Error replaying events:', err);
+      console.error('❌ Replay error:', err);
     }
   } else {
-    // New connection - send initial event and store in Redis
-    const eventData = { type: "connected", conversationId };
-    const eventId = await redisClient.xAdd(`stream:${conversationId}`, '*', {
-      type: 'connected',
-      data: JSON.stringify(eventData)
-    });
-    res.write(`id: ${eventId}\n`);
-    res.write(`data: ${JSON.stringify(eventData)}\n\n`);
+    // New connection - send connected event
+    try {
+      const eventData = { type: "connected", conversationId };
+      const eventId = await redisClient.xAdd(streamKey, '*', {
+        data: JSON.stringify(eventData)
+      });
+      res.write(`id: ${eventId}\ndata: ${JSON.stringify(eventData)}\n\n`);
+    } catch (err) {
+      console.error('❌ Redis error:', err);
+      const fallbackId = Date.now().toString();
+      res.write(`id: ${fallbackId}\ndata: ${JSON.stringify({ type: "connected", conversationId })}\n\n`);
+    }
   }
 
   // Set up event listeners for this conversation
   const messageHandler = async (data) => {
     try {
       const eventData = { type: "message", message: data.message };
-      
-      // Store in Redis Stream (let Redis auto-generate ID)
-      const eventId = await redisClient.xAdd(`stream:${conversationId}`, '*', {
-        type: 'message',
+      const eventId = await redisClient.xAdd(streamKey, '*', {
         data: JSON.stringify(eventData)
       });
-      
-      // Send to client with ID
-      res.write(`id: ${eventId}\n`);
-      res.write(`data: ${JSON.stringify(eventData)}\n\n`);
+      res.write(`id: ${eventId}\ndata: ${JSON.stringify(eventData)}\n\n`);
     } catch (err) {
-      console.error("Error writing message:", err);
+      console.error("❌ Message handler error:", err);
     }
   };
 
   const tokenHandler = async (data) => {
     try {
       const eventData = { type: "token", content: data.content, messageId: data.messageId };
-      
-      // Store in Redis Stream (let Redis auto-generate ID)
-      const eventId = await redisClient.xAdd(`stream:${conversationId}`, '*', {
-        type: 'token',
+      const eventId = await redisClient.xAdd(streamKey, '*', {
         data: JSON.stringify(eventData)
       });
-      
-      // Send to client with ID
-      res.write(`id: ${eventId}\n`);
-      res.write(`data: ${JSON.stringify(eventData)}\n\n`);
+      res.write(`id: ${eventId}\ndata: ${JSON.stringify(eventData)}\n\n`);
     } catch (err) {
-      console.error("Error writing token:", err);
+      console.error("❌ Token handler error:", err);
     }
   };
 
   const statusHandler = async (data) => {
     try {
       const eventData = { type: "status", content: data.content };
-      
-      // Store in Redis Stream (let Redis auto-generate ID)
-      const eventId = await redisClient.xAdd(`stream:${conversationId}`, '*', {
-        type: 'status',
+      const eventId = await redisClient.xAdd(streamKey, '*', {
         data: JSON.stringify(eventData)
       });
-      
-      // Send to client with ID
-      res.write(`id: ${eventId}\n`);
-      res.write(`data: ${JSON.stringify(eventData)}\n\n`);
+      res.write(`id: ${eventId}\ndata: ${JSON.stringify(eventData)}\n\n`);
     } catch (err) {
-      console.error("Error writing status:", err);
+      console.error("❌ Status handler error:", err);
     }
   };
 
   const doneHandler = async (data) => {
     try {
       const eventData = { type: "done", messageId: data.messageId };
-      
-      // Store in Redis Stream (let Redis auto-generate ID)
-      const eventId = await redisClient.xAdd(`stream:${conversationId}`, '*', {
-        type: 'done',
+      const eventId = await redisClient.xAdd(streamKey, '*', {
         data: JSON.stringify(eventData)
       });
+      res.write(`id: ${eventId}\ndata: ${JSON.stringify(eventData)}\n\n`);
       
-      // Send to client with ID
-      res.write(`id: ${eventId}\n`);
-      res.write(`data: ${JSON.stringify(eventData)}\n\n`);
-      
-      // Set expiration on stream (10 minutes after completion)
-      await redisClient.expire(`stream:${conversationId}`, 600);
+      // Expire stream after 1 hour
+      await redisClient.expire(streamKey, 3600);
     } catch (err) {
-      console.error("Error writing done:", err);
+      console.error("❌ Done handler error:", err);
     }
   };
 
@@ -425,7 +422,7 @@ app.get("/api/stream/:conversationId", async (req, res) => {
 });
 
 // ---------------- CHAT ENDPOINT (JSON POST) ----------------
-app.post("/api/chat/:conversationId", async (req, res) => {
+app.post("/api/chat/:conversationId", checkDBConnection, async (req, res) => {
   const conversationId = req.params.conversationId;
   
   try {
