@@ -105,22 +105,89 @@ function ChatCard({ conversationId, onFirstMessage }) {
         try {
           const data = JSON.parse(event.data);
 
-          if (data.type === "message") {
+          if (data.type === "sync") {
+            // Full message sync after reconnection - includes all messages with accumulated text
+            console.log('📥 Sync received with', data.messages?.length, 'messages');
+            const syncedMessages = data.messages.map((msg) => {
+              const message = {
+                id: msg.id || Date.now(),
+                type: msg.type,
+                text: msg.text || ""
+              };
+              if (msg.streaming) {
+                console.log('📝 Streaming message in sync:', msg.id, 'text length:', msg.text?.length);
+              }
+              return message;
+            });
+            
+            setMessages([
+              { id: 1, type: "bot", text: `Hi! I'm your weather assistant. Ask me about any city!` },
+              ...syncedMessages
+            ]);
+            
+            // Check if there's a streaming message and set typing state
+            const hasStreaming = data.messages.some(m => m.streaming);
+            if (hasStreaming) {
+              setIsTyping(false); // Ready to receive more tokens
+            }
+          } else if (data.type === "resume") {
+            // Resume streaming message - show accumulated text and continue
             setMessages((prev) => {
-              // Better deduplication - check exact text and type match
-              const exists = prev.some(m => 
-                m.text === data.message.text && 
-                m.type === data.message.type
-              );
+              const exists = prev.find(m => m.id === data.messageId);
               if (exists) {
-                console.log('⚠️ Duplicate message ignored:', data.message.text.substring(0, 30));
+                // Update existing message
+                return prev.map(m => 
+                  m.id === data.messageId 
+                    ? { ...m, text: data.currentText }
+                    : m
+                );
+              } else {
+                // Add new message with accumulated text
+                return [...prev, {
+                  id: data.messageId,
+                  type: "bot",
+                  text: data.currentText
+                }];
+              }
+            });
+            if (!data.isComplete) {
+              setIsTyping(false); // Ready to continue streaming
+            }
+          } else if (data.type === "message") {
+            setMessages((prev) => {
+              // Check by ID only - don't block same text from different users
+              const existsById = prev.some(m => m.id === data.message.id);
+              if (existsById) {
                 return prev;
               }
               
+              // Replace optimistic message with real one (only for own messages)
+              const optimisticIndex = prev.findIndex(m => 
+                m.isOptimistic && 
+                m.text === data.message.text && 
+                m.type === data.message.type
+              );
+              
+              if (optimisticIndex !== -1) {
+                // Replace optimistic message with real message from server
+                return prev.map((msg, idx) => 
+                  idx === optimisticIndex 
+                    ? {
+                        id: data.message.id || Date.now(),
+                        type: data.message.type,
+                        text: data.message.text,
+                        isOptimistic: false
+                      }
+                    : msg
+                );
+              }
+              
+              // Add new message - allow duplicate text from different users
               return [...prev, {
                 id: data.message.id || Date.now(),
                 type: data.message.type,
-                text: data.message.text
+                text: data.message.text,
+                isOptimistic: false
               }];
             });
           } else if (data.type === "status") {
@@ -130,12 +197,18 @@ function ChatCard({ conversationId, onFirstMessage }) {
           } else if (data.type === "token") {
             setIsTyping(false);
             setMessages((prev) => {
-              const lastMsg = prev[prev.length - 1];
-              if (lastMsg?.type === "bot" && lastMsg.id === data.messageId) {
+              // Find existing message by ID
+              const existingIndex = prev.findIndex(m => m.id === data.messageId);
+              
+              if (existingIndex !== -1) {
+                // Message exists - append token
                 return prev.map((msg, idx) =>
-                  idx === prev.length - 1 ? { ...msg, text: msg.text + data.content } : msg
+                  idx === existingIndex ? { ...msg, text: msg.text + data.content } : msg
                 );
               }
+              
+              // Message doesn't exist - create it (first token in new stream)
+              // After refresh, sync will provide the message before tokens arrive
               return [...prev, {
                 id: data.messageId,
                 type: "bot",
@@ -185,13 +258,15 @@ function ChatCard({ conversationId, onFirstMessage }) {
       return;
     }
 
-    const tempId = Date.now();
+    // Generate unique temp ID for optimistic update
+    const tempId = `temp-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
     
-    // Optimistic UI - show user message immediately
+    // Optimistic UI - show user message immediately for instant feedback
     setMessages((prev) => [...prev, {
       id: tempId,
       type: "user",
-      text: messageText
+      text: messageText,
+      isOptimistic: true  // Mark as optimistic
     }]);
     
     setIsTyping(true);
@@ -215,7 +290,7 @@ function ChatCard({ conversationId, onFirstMessage }) {
       console.error("❌ Send error:", err);
       setIsTyping(false);
       // Remove optimistic message and show error
-      setMessages((prev) => prev.filter(m => m.id !== tempId));
+      setMessages((prev) => prev.filter(m => !m.isOptimistic));
       setMessages((prev) => [...prev, { 
         id: Date.now(), 
         type: "bot", 
@@ -312,3 +387,4 @@ function ChatCard({ conversationId, onFirstMessage }) {
 }
 
 export default ChatCard
+

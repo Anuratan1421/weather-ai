@@ -29,16 +29,20 @@ app.use(express.static("public")); // serve frontend
 const connectDB = async () => {
   try {
     await mongoose.connect(process.env.MONGO_URI, {
-      serverSelectionTimeoutMS: 5000,
+      serverSelectionTimeoutMS: 3000,  // Faster timeout
       socketTimeoutMS: 45000,
-      // Serverless-friendly: no pooling, single connection per instance
-      maxPoolSize: 1,
+      connectTimeoutMS: 3000,  // Add connection timeout
+      // Optimized pooling for better performance
+      minPoolSize: 10,  // Keep more connections warm
+      maxPoolSize: 50,  // Allow more concurrent connections
+      maxIdleTimeMS: 60000,  // Keep connections alive longer
+      maxConnecting: 10,  // Allow more parallel connections
     });
     console.log('✅ MongoDB connected');
   } catch (err) {
     console.error('❌ MongoDB connection error:', err);
-    // Retry connection after 5 seconds
-    setTimeout(connectDB, 5000);
+    // Retry connection after 2 seconds for faster recovery
+    setTimeout(connectDB, 2000);
   }
 };
 
@@ -82,9 +86,11 @@ await redisClient.connect();
 const conversationSchema = new mongoose.Schema({
   conversationId: { type: String, required: true, unique: true, index: true },
   messages: [{
+    id: { type: String, default: () => `msg-${Date.now()}-${Math.random().toString(36).substr(2, 9)}` },
     type: { type: String, enum: ['user', 'bot'], required: true },
     text: { type: String, required: true },
-    timestamp: { type: Date, default: Date.now }
+    timestamp: { type: Date, default: Date.now },
+    streaming: { type: Boolean, default: false }
   }],
   history: [{
     type: { type: String, enum: ['human', 'ai'], required: true },
@@ -93,14 +99,45 @@ const conversationSchema = new mongoose.Schema({
   lastCity: { type: String, default: null },
   title: { type: String, default: 'New Chat' },
   createdAt: { type: Date, default: Date.now },
-  lastActivity: { type: Date, default: Date.now }
+  lastActivity: { type: Date, default: Date.now, index: true }
+});
+
+// Add compound index for faster queries
+conversationSchema.index({ conversationId: 1, lastActivity: -1 });
+
+// Pre-save hook to ensure all messages have IDs (for backward compatibility)
+conversationSchema.pre('save', function() {
+  if (this.messages && this.messages.length > 0) {
+    this.messages.forEach((msg, index) => {
+      if (!msg.id) {
+        msg.id = `msg-${Date.now()}-${index}-${Math.random().toString(36).substr(2, 6)}`;
+      }
+    });
+  }
 });
 
 const Conversation = mongoose.model('Conversation', conversationSchema);
 
 // ---------------- CONVERSATION STORAGE ----------------
-// In-memory cache for active conversations (for quick access)
+// In-memory cache for active conversations with TTL
 const conversationCache = new Map();
+const CACHE_TTL = 5 * 60 * 1000; // 5 minutes
+
+function getCachedConversation(id) {
+  const cached = conversationCache.get(id);
+  if (cached && Date.now() - cached.timestamp < CACHE_TTL) {
+    return cached.data;
+  }
+  conversationCache.delete(id);
+  return null;
+}
+
+function setCachedConversation(id, data) {
+  conversationCache.set(id, {
+    data,
+    timestamp: Date.now()
+  });
+}
 
 // EventEmitter for broadcasting to multiple clients
 const conversationEvents = new EventEmitter();
@@ -230,6 +267,7 @@ app.post("/api/conversations", checkDBConnection, async (req, res) => {
     });
     
     await newConversation.save();
+    setCachedConversation(conversationId, newConversation);
     console.log('✅ Created conversation:', conversationId);
     res.json({ conversationId });
   } catch (error) {
@@ -244,13 +282,26 @@ app.post("/api/conversations", checkDBConnection, async (req, res) => {
 // ---------------- GET CONVERSATION ----------------
 app.get("/api/conversations/:id", checkDBConnection, async (req, res) => {
   try {
-    const conversation = await Conversation.findOne({ conversationId: req.params.id }).lean();
+    let conversation = getCachedConversation(req.params.id);
+    
     if (!conversation) {
-      return res.status(404).json({ error: "Conversation not found" });
+      conversation = await Conversation.findOne({ conversationId: req.params.id })
+        .select('conversationId messages history lastCity title createdAt lastActivity')
+        .lean();
+      
+      if (!conversation) {
+        return res.status(404).json({ error: "Conversation not found" });
+      }
+      
+      setCachedConversation(req.params.id, conversation);
     }
+    
+    // Filter out messages still streaming
+    const messages = conversation.messages.filter(m => !m.streaming);
+    
     res.json({
       id: conversation.conversationId,
-      messages: conversation.messages,
+      messages: messages,
       history: conversation.history,
       lastCity: conversation.lastCity,
       title: conversation.title,
@@ -269,6 +320,7 @@ app.get("/api/conversations", checkDBConnection, async (req, res) => {
     const allConversations = await Conversation.find()
       .sort({ lastActivity: -1 })
       .select('conversationId title lastActivity messages')
+      .limit(50)
       .lean();
     
     res.json(allConversations.map(c => ({
@@ -304,23 +356,44 @@ app.get("/api/stream/:conversationId", async (req, res) => {
   }
   conversationClients.get(conversationId).add(res);
 
-  // Handle reconnection - replay missed events from Redis
+  // Handle reconnection - send current message state instead of replaying tokens
   const streamKey = `stream:${conversationId}`;
   
   if (lastEventId) {
     try {
-      console.log(`🔄 Reconnect: replaying from ${lastEventId}`);
-      const events = await redisClient.xRange(streamKey, `(${lastEventId}`, '+');
+      console.log(`🔄 Reconnect: checking messages from ${lastEventId}`);
       
-      if (events?.length > 0) {
-        console.log(`✅ Replaying ${events.length} events`);
-        for (const event of events) {
-          const data = JSON.parse(event.message.data);
-          res.write(`id: ${event.id}\ndata: ${JSON.stringify(data)}\n\n`);
+      // Get current conversation state from DB
+      const conversation = await Conversation.findOne({ conversationId }).lean();
+      if (conversation && conversation.messages.length > 0) {
+        // Send ALL messages including streaming ones with their accumulated text
+        const allMessages = conversation.messages.map(m => ({
+          id: m.id,
+          type: m.type,
+          text: m.text,
+          streaming: m.streaming || false
+        }));
+        
+        if (allMessages.length > 0) {
+          const syncData = {
+            type: "sync",
+            messages: allMessages
+          };
+          const syncEventId = `sync-${Date.now()}`;
+          res.write(`id: ${syncEventId}\ndata: ${JSON.stringify(syncData)}\n\n`);
+          
+          // Log streaming message info
+          const streamingMsg = allMessages.find(m => m.streaming);
+          if (streamingMsg) {
+            console.log(`📝 Sync includes streaming message ${streamingMsg.id}, text length: ${streamingMsg.text?.length || 0}`);
+          }
         }
       }
+      
+      // Do NOT replay token events - sync is source of truth
+      // Tokens are disposable, persisted text is authoritative
     } catch (err) {
-      console.error('❌ Replay error:', err);
+      console.error('❌ Reconnect error:', err);
     }
   } else {
     // New connection - send connected event
@@ -329,10 +402,12 @@ app.get("/api/stream/:conversationId", async (req, res) => {
       const eventId = await redisClient.xAdd(streamKey, '*', {
         data: JSON.stringify(eventData)
       });
+      // Set TTL immediately to prevent memory leak
+      await redisClient.expire(streamKey, 7200); // 2 hours
       res.write(`id: ${eventId}\ndata: ${JSON.stringify(eventData)}\n\n`);
     } catch (err) {
       console.error('❌ Redis error:', err);
-      const fallbackId = Date.now().toString();
+      const fallbackId = `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
       res.write(`id: ${fallbackId}\ndata: ${JSON.stringify({ type: "connected", conversationId })}\n\n`);
     }
   }
@@ -350,8 +425,11 @@ app.get("/api/stream/:conversationId", async (req, res) => {
     }
   };
 
+  // Token handler - send tokens immediately without buffering
+  // Buffering caused duplicate text across multiple clients
   const tokenHandler = async (data) => {
     try {
+      // Send token immediately to this client
       const eventData = { type: "token", content: data.content, messageId: data.messageId };
       const eventId = await redisClient.xAdd(streamKey, '*', {
         data: JSON.stringify(eventData)
@@ -382,8 +460,8 @@ app.get("/api/stream/:conversationId", async (req, res) => {
       });
       res.write(`id: ${eventId}\ndata: ${JSON.stringify(eventData)}\n\n`);
       
-      // Expire stream after 1 hour
-      await redisClient.expire(streamKey, 3600);
+      // Extend TTL after completion
+      await redisClient.expire(streamKey, 7200);
     } catch (err) {
       console.error("❌ Done handler error:", err);
     }
@@ -397,7 +475,7 @@ app.get("/api/stream/:conversationId", async (req, res) => {
   // Send heartbeat every 30 seconds to keep connection alive
   const heartbeat = setInterval(() => {
     try {
-      res.write(`: heartbeat\n\n`);
+      res.write(`: heartbeat ${Date.now()}\n\n`);
     } catch (err) {
       clearInterval(heartbeat);
     }
@@ -449,19 +527,24 @@ app.post("/api/chat/:conversationId", checkDBConnection, async (req, res) => {
     conversation.lastActivity = new Date();
 
     // Add user message to DB
-    const userMsgId = Date.now();
-    const userMsg = { type: "user", text: userMessage, timestamp: new Date() };
+    const userMsgId = `user-${Date.now()}-${Math.random().toString(36).substr(2, 6)}`;
+    const userMsg = { 
+      id: userMsgId,
+      type: "user", 
+      text: userMessage, 
+      timestamp: new Date(),
+      streaming: false
+    };
     conversation.messages.push(userMsg);
     await conversation.save();
+    
+    // Invalidate cache
+    conversationCache.delete(conversationId);
 
-    // Broadcast user message to all connected clients IMMEDIATELY
+    // CRITICAL: Broadcast user message SYNCHRONOUSLY first to ALL connected clients
+    // This MUST happen before status to ensure users see the question before the answer
     conversationEvents.emit(`${conversationId}:message`, {
       message: { type: "user", text: userMessage, id: userMsgId }
-    });
-
-    // Broadcast processing status immediately
-    conversationEvents.emit(`${conversationId}:status`, {
-      content: "processing"
     });
 
     // Send immediate response to poster
@@ -469,7 +552,15 @@ app.post("/api/chat/:conversationId", checkDBConnection, async (req, res) => {
 
     // Process AI response in background (non-blocking)
     setImmediate(async () => {
+      const botMsgId = `bot-${Date.now()}`;
+      let fullReply = "";
+      
       try {
+        // Broadcast processing status AFTER user message is sent
+        conversationEvents.emit(`${conversationId}:status`, {
+          content: "processing"
+        });
+        
         // Build LangChain messages
         const messages = [new SystemMessage(SYSTEM_PROMPT)];
 
@@ -513,9 +604,7 @@ app.post("/api/chat/:conversationId", checkDBConnection, async (req, res) => {
         });
 
         // STEP 3: STREAM FINAL RESPONSE
-        const messageId = Date.now();
         const finalStream = await llm.stream(messages);
-        let fullReply = "";
 
         for await (const chunk of finalStream) {
           if (!chunk.content) continue;
@@ -531,8 +620,26 @@ app.post("/api/chat/:conversationId", checkDBConnection, async (req, res) => {
             // Broadcast token to all connected clients
             conversationEvents.emit(`${conversationId}:token`, {
               content: text,
-              messageId
+              messageId: botMsgId
             });
+            
+            // CRITICAL: Persist full accumulated text on EVERY token
+            // This ensures database is always authoritative source of truth
+            const msgIndex = conversation.messages.findIndex(m => m.id === botMsgId);
+            if (msgIndex === -1) {
+              // First token - create the message
+              conversation.messages.push({
+                id: botMsgId,
+                type: "bot",
+                text: fullReply,
+                timestamp: new Date(),
+                streaming: true
+              });
+            } else {
+              // Update existing message with full accumulated text
+              conversation.messages[msgIndex].text = fullReply;
+            }
+            await conversation.save();
           }
         }
 
@@ -541,24 +648,40 @@ app.post("/api/chat/:conversationId", checkDBConnection, async (req, res) => {
           fullReply = "Here's the weather information you requested 🌦";
         }
 
-        // Update conversation in DB
-        conversation.messages.push({ type: "bot", text: fullReply, timestamp: new Date() });
+        // Final save with streaming=false
+        const msgIndex = conversation.messages.findIndex(m => m.id === botMsgId);
+        if (msgIndex !== -1) {
+          conversation.messages[msgIndex].text = fullReply;
+          conversation.messages[msgIndex].streaming = false;
+        }
+        
         conversation.history.push({ type: "human", text: userMessage });
         conversation.history.push({ type: "ai", text: fullReply });
         await conversation.save();
+        
+        // Invalidate cache
+        conversationCache.delete(conversationId);
 
         // Broadcast completion to all connected clients
         conversationEvents.emit(`${conversationId}:done`, {
-          messageId
+          messageId: botMsgId
         });
 
       } catch (error) {
         console.error("AI processing error:", error);
+        
+        // Remove streaming message on error
+        const msgIndex = conversation.messages.findIndex(m => m.id === botMsgId);
+        if (msgIndex !== -1) {
+          conversation.messages.splice(msgIndex, 1);
+          await conversation.save();
+        }
+        
         conversationEvents.emit(`${conversationId}:message`, {
-          message: { type: "bot", text: "Sorry, an error occurred.", id: Date.now() }
+          message: { type: "bot", text: "Sorry, an error occurred.", id: `error-${Date.now()}` }
         });
         conversationEvents.emit(`${conversationId}:done`, {
-          messageId: Date.now()
+          messageId: botMsgId
         });
       }
     });
