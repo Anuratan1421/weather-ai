@@ -2,23 +2,32 @@
 
 import { useState, useRef, useEffect, useCallback } from "react"
 import { useNavigate, useLocation } from "react-router-dom"
+import { useStreamManager } from "../hooks/useStreamManager"
 import "./ChatCard.css"
 
-const API_BASE = "https://sanch-ai.vercel.app";
+const API_BASE = "http://localhost:3000";
 
 function ChatCard({ conversationId, onFirstMessage }) {
   const navigate = useNavigate();
   const location = useLocation();
-  const [messages, setMessages] = useState([
-    { id: 1, type: "bot", text: `Hi! I'm your weather assistant. Ask me about any city!` },
-  ])
+  // Use a message map for robust streaming/refresh
+  const [messageMap, setMessageMap] = useState(() => {
+    const map = new Map();
+    map.set('init', { id: 'init', type: 'bot', text: `Hi! I'm your weather assistant. Ask me about any city!`, order: 0 });
+    return map;
+  });
+  // For rendering
+  const getMessagesArray = () => {
+    const messages = Array.from(messageMap.values()).sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
+    console.log('📋 Rendering messages:', messages.length, messages);
+    return messages;
+  };
   const [input, setInput] = useState("")
   const [isTyping, setIsTyping] = useState(false)
   const [isLoading, setIsLoading] = useState(false)
   const messagesEndRef = useRef(null)
-  const eventSourceRef = useRef(null)
   const pendingMessageSentRef = useRef(false)
-  const reconnectTimeoutRef = useRef(null)
+  const sendMessageRef = useRef(null)
 
   const scrollToBottom = useCallback(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" })
@@ -26,13 +35,14 @@ function ChatCard({ conversationId, onFirstMessage }) {
 
   useEffect(() => {
     scrollToBottom()
-  }, [messages, scrollToBottom])
+  }, [messageMap, scrollToBottom])
 
   // Load conversation when conversationId changes
   useEffect(() => {
     if (!conversationId) {
       pendingMessageSentRef.current = false;
       setIsLoading(false);
+      setMessageMap(new Map([['init', { id: 'init', type: 'bot', text: `Hi! I'm your weather assistant. Ask me about any city!`, order: 0 }]]));
       return;
     }
 
@@ -40,216 +50,145 @@ function ChatCard({ conversationId, onFirstMessage }) {
       setIsLoading(true);
       try {
         const res = await fetch(`${API_BASE}/api/conversations/${conversationId}`);
-        
-        if (!res.ok) {
-          throw new Error(`HTTP ${res.status}`);
-        }
-        
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const data = await res.json();
-        
+        const map = new Map();
+        map.set('init', { id: 'init', type: 'bot', text: `Hi! I'm your weather assistant. Ask me about any city!`, order: 0 });
         if (data.messages?.length > 0) {
-          setMessages(data.messages.map((msg, idx) => ({
-            id: msg.id || idx + 1,
-            type: msg.type,
-            text: msg.text
-          })));
-        } else {
-          setMessages([
-            { id: 1, type: "bot", text: `Hi! I'm your weather assistant. Ask me about any city!` }
-          ]);
+          data.messages.forEach((msg, idx) => {
+            map.set(msg.id, {
+              id: msg.id,
+              type: msg.type,
+              text: msg.text,
+              order: idx + 1,
+              streaming: msg.streaming,
+              timestamp: msg.timestamp || Date.now() + idx
+            });
+          });
         }
+        setMessageMap(map);
       } catch (error) {
         console.error("Error loading conversation:", error);
-        setMessages([
-          { id: 1, type: "bot", text: `Hi! I'm your weather assistant. Ask me about any city!` }
-        ]);
+        setMessageMap(new Map([['init', { id: 'init', type: 'bot', text: `Hi! I'm your weather assistant. Ask me about any city!`, order: 0 }]]));
       } finally {
         setIsLoading(false);
       }
     };
-
     loadConversation();
-  }, [conversationId]); // Only reload when conversationId changes
-
-  // Don't auto-send pending messages - they're already sent before navigation
-
-  // Set up SSE connection for real-time updates
-  useEffect(() => {
-    if (!conversationId) return;
-
-    let eventSource;
-    let isCleanedUp = false;
-
-    const setupSSE = () => {
-      if (isCleanedUp) return;
-
-      // Close existing connection
-      if (eventSourceRef.current) {
-        eventSourceRef.current.close();
-      }
-
-      console.log('🔗 Connecting SSE:', conversationId);
-      eventSource = new EventSource(`${API_BASE}/api/stream/${conversationId}`);
-      eventSourceRef.current = eventSource;
-
-      eventSource.onopen = () => {
-        console.log('✅ SSE Connected');
-        // Clear any pending reconnect
-        if (reconnectTimeoutRef.current) {
-          clearTimeout(reconnectTimeoutRef.current);
-          reconnectTimeoutRef.current = null;
-        }
-      };
-
-      eventSource.onmessage = (event) => {
-        try {
-          const data = JSON.parse(event.data);
-
-          if (data.type === "sync") {
-            // Full message sync after reconnection - includes all messages with accumulated text
-            console.log('📥 Sync received with', data.messages?.length, 'messages');
-            const syncedMessages = data.messages.map((msg) => {
-              const message = {
-                id: msg.id || Date.now(),
-                type: msg.type,
-                text: msg.text || ""
-              };
-              if (msg.streaming) {
-                console.log('📝 Streaming message in sync:', msg.id, 'text length:', msg.text?.length);
-              }
-              return message;
-            });
-            
-            setMessages([
-              { id: 1, type: "bot", text: `Hi! I'm your weather assistant. Ask me about any city!` },
-              ...syncedMessages
-            ]);
-            
-            // Check if there's a streaming message and set typing state
-            const hasStreaming = data.messages.some(m => m.streaming);
-            if (hasStreaming) {
-              setIsTyping(false); // Ready to receive more tokens
-            }
-          } else if (data.type === "resume") {
-            // Resume streaming message - show accumulated text and continue
-            setMessages((prev) => {
-              const exists = prev.find(m => m.id === data.messageId);
-              if (exists) {
-                // Update existing message
-                return prev.map(m => 
-                  m.id === data.messageId 
-                    ? { ...m, text: data.currentText }
-                    : m
-                );
-              } else {
-                // Add new message with accumulated text
-                return [...prev, {
-                  id: data.messageId,
-                  type: "bot",
-                  text: data.currentText
-                }];
-              }
-            });
-            if (!data.isComplete) {
-              setIsTyping(false); // Ready to continue streaming
-            }
-          } else if (data.type === "message") {
-            setMessages((prev) => {
-              // Check by ID only - don't block same text from different users
-              const existsById = prev.some(m => m.id === data.message.id);
-              if (existsById) {
-                return prev;
-              }
-              
-              // Replace optimistic message with real one (only for own messages)
-              const optimisticIndex = prev.findIndex(m => 
-                m.isOptimistic && 
-                m.text === data.message.text && 
-                m.type === data.message.type
-              );
-              
-              if (optimisticIndex !== -1) {
-                // Replace optimistic message with real message from server
-                return prev.map((msg, idx) => 
-                  idx === optimisticIndex 
-                    ? {
-                        id: data.message.id || Date.now(),
-                        type: data.message.type,
-                        text: data.message.text,
-                        isOptimistic: false
-                      }
-                    : msg
-                );
-              }
-              
-              // Add new message - allow duplicate text from different users
-              return [...prev, {
-                id: data.message.id || Date.now(),
-                type: data.message.type,
-                text: data.message.text,
-                isOptimistic: false
-              }];
-            });
-          } else if (data.type === "status") {
-            if (data.content === "processing" || data.content === "generating") {
-              setIsTyping(true);
-            }
-          } else if (data.type === "token") {
-            setIsTyping(false);
-            setMessages((prev) => {
-              // Find existing message by ID
-              const existingIndex = prev.findIndex(m => m.id === data.messageId);
-              
-              if (existingIndex !== -1) {
-                // Message exists - append token
-                return prev.map((msg, idx) =>
-                  idx === existingIndex ? { ...msg, text: msg.text + data.content } : msg
-                );
-              }
-              
-              // Message doesn't exist - create it (first token in new stream)
-              // After refresh, sync will provide the message before tokens arrive
-              return [...prev, {
-                id: data.messageId,
-                type: "bot",
-                text: data.content
-              }];
-            });
-          } else if (data.type === "done") {
-            setIsTyping(false);
-          } else if (data.type === "connected") {
-            console.log('✅ SSE session established:', data.conversationId);
-          }
-        } catch (e) {
-          console.error('❌ SSE parse error:', e);
-        }
-      };
-
-      eventSource.onerror = (error) => {
-        console.error('❌ SSE error:', error);
-        eventSource.close();
-        
-        // Attempt reconnect after 3 seconds if not cleaned up
-        if (!isCleanedUp) {
-          console.log('🔄 Reconnecting in 3s...');
-          reconnectTimeoutRef.current = setTimeout(() => {
-            if (!isCleanedUp) setupSSE();
-          }, 3000);
-        }
-      };
-    };
-
-    setupSSE();
-
-    // Cleanup on unmount
-    return () => {
-      isCleanedUp = true;
-      if (eventSource) eventSource.close();
-      if (reconnectTimeoutRef.current) {
-        clearTimeout(reconnectTimeoutRef.current);
-      }
-    };
   }, [conversationId]);
+
+  // Handle SSE messages
+  const handleSSEMessage = useCallback((data) => {
+    console.log('📨 SSE received:', data.type, data);
+    setMessageMap((prevMap) => {
+      const map = new Map(prevMap);
+      if (data.type === "sync") {
+        // Merge all messages from sync, preserving any streaming message
+        data.messages.forEach((msg, idx) => {
+          map.set(msg.id, {
+            ...map.get(msg.id),
+            id: msg.id,
+            type: msg.type,
+            text: msg.text,
+            order: idx + 1,
+            streaming: msg.streaming,
+            timestamp: msg.timestamp || Date.now() + idx
+          });
+        });
+        // Only remove optimistic user message if a real user message with the same text exists
+        for (const [k, v] of map.entries()) {
+          if (v.isOptimistic && v.type === 'user') {
+            const hasReal = Array.from(map.values()).some(m => m.type === 'user' && m.text === v.text && !m.isOptimistic);
+            if (hasReal) map.delete(k);
+          }
+        }
+        return map;
+      } else if (data.type === "resume") {
+        // Resume streaming message
+        if (map.has(data.messageId)) {
+          const m = map.get(data.messageId);
+          map.set(data.messageId, { ...m, text: data.currentText });
+        } else {
+          const maxOrder = Math.max(0, ...Array.from(map.values()).map(m => m.order ?? 0));
+          map.set(data.messageId, {
+            id: data.messageId,
+            type: "bot",
+            text: data.currentText,
+            order: maxOrder + 1,
+            streaming: true
+          });
+        }
+        return map;
+      } else if (data.type === "message") {
+        // Remove optimistic user message only if a real user message with the same text arrives
+        if (data.message.type === 'user') {
+          for (const [k, v] of map.entries()) {
+            if (v.isOptimistic && v.type === 'user' && v.text === data.message.text) {
+              map.delete(k);
+            }
+          }
+        }
+        // Always show bot messages
+        const maxOrder = Math.max(0, ...Array.from(map.values()).map(m => m.order ?? 0));
+        map.set(data.message.id, {
+          ...data.message,
+          order: maxOrder + 1,
+          isOptimistic: false
+        });
+        return map;
+      } else if (data.type === "status") {
+        if (data.content === "processing" || data.content === "generating") {
+          setIsTyping(true);
+        }
+        return map;
+      } else if (data.type === "token") {
+        setIsTyping(false);
+        // Append token to streaming message
+        if (map.has(data.messageId)) {
+          const m = map.get(data.messageId);
+          map.set(data.messageId, { ...m, text: (m.text || "") + data.content });
+        } else {
+          const maxOrder = Math.max(0, ...Array.from(map.values()).map(m => m.order ?? 0));
+          map.set(data.messageId, {
+            id: data.messageId,
+            type: "bot",
+            text: data.content,
+            order: maxOrder + 1,
+            streaming: true
+          });
+        }
+        return map;
+      } else if (data.type === "done") {
+        setIsTyping(false);
+        // Mark streaming message as done
+        // (optional: could set streaming: false)
+        return map;
+      } else if (data.type === "connected") {
+        return map;
+      }
+      return map;
+    });
+  }, []);
+
+  // Use stream manager hook - connect even on empty conversationId to prepare
+  // This ensures we don't miss messages when conversation is created
+  useStreamManager(conversationId, handleSSEMessage, true);
+
+  // Handle pending message from navigation state (after creating new conversation)
+  useEffect(() => {
+    const pendingMessage = location.state?.pendingMessage;
+    if (pendingMessage && conversationId && !pendingMessageSentRef.current && sendMessageRef.current) {
+      pendingMessageSentRef.current = true;
+      // Small delay to ensure SSE connection is established
+      setTimeout(() => {
+        sendMessageRef.current(pendingMessage);
+      }, 300);
+    }
+    // Reset ref if conversationId changes (new chat)
+    if (!pendingMessage && conversationId) {
+      pendingMessageSentRef.current = false;
+    }
+  }, [conversationId, location.state?.pendingMessage]);
 
   // Extract message sending logic with useCallback for better performance
   const sendMessage = useCallback(async (messageText) => {
@@ -262,12 +201,18 @@ function ChatCard({ conversationId, onFirstMessage }) {
     const tempId = `temp-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
     
     // Optimistic UI - show user message immediately for instant feedback
-    setMessages((prev) => [...prev, {
-      id: tempId,
-      type: "user",
-      text: messageText,
-      isOptimistic: true  // Mark as optimistic
-    }]);
+      setMessageMap((prevMap) => {
+        const map = new Map(prevMap);
+        const maxOrder = Math.max(0, ...Array.from(map.values()).map(m => m.order ?? 0));
+        map.set(tempId, {
+          id: tempId,
+          type: "user",
+          text: messageText,
+          isOptimistic: true,
+          order: maxOrder + 1
+        });
+        return map;
+      });
     
     setIsTyping(true);
 
@@ -290,14 +235,27 @@ function ChatCard({ conversationId, onFirstMessage }) {
       console.error("❌ Send error:", err);
       setIsTyping(false);
       // Remove optimistic message and show error
-      setMessages((prev) => prev.filter(m => !m.isOptimistic));
-      setMessages((prev) => [...prev, { 
-        id: Date.now(), 
-        type: "bot", 
-        text: `Error: ${err.message || 'Server unavailable. Please try again.'}` 
-      }]);
+      setMessageMap((prevMap) => {
+        const map = new Map(prevMap);
+        for (const [k, v] of map.entries()) {
+          if (v.isOptimistic) map.delete(k);
+        }
+        const maxOrder = Math.max(0, ...Array.from(map.values()).map(m => m.order ?? 0));
+        map.set(Date.now().toString(), {
+          id: Date.now().toString(),
+          type: "bot",
+          text: `Error: ${err.message || 'Server unavailable. Please try again.'}`,
+          order: maxOrder + 1
+        });
+        return map;
+      });
     }
   }, [conversationId]);
+
+  // Store sendMessage in ref for pending message handler
+  useEffect(() => {
+    sendMessageRef.current = sendMessage;
+  }, [sendMessage]);
 
   const handleSend = useCallback(async () => {
     if (!input.trim()) return
@@ -305,14 +263,13 @@ function ChatCard({ conversationId, onFirstMessage }) {
     const userText = input
     setInput("")
 
-    // If no conversationId exists (first message), create one and send message
+    // If no conversationId exists (first message), create conversation first
     if (!conversationId && onFirstMessage) {
+      console.log('🆕 Creating new conversation for first message...');
       try {
-        const newConversationId = await onFirstMessage(userText);
-        if (!newConversationId) {
-          throw new Error('Failed to create conversation');
-        }
-        // Message will be sent via sendMessage after navigation completes
+        // onFirstMessage will navigate with the message in state
+        await onFirstMessage(userText);
+        // Message will be sent by the pending message handler
         return;
       } catch (error) {
         console.error("Error creating conversation:", error);
@@ -346,7 +303,7 @@ function ChatCard({ conversationId, onFirstMessage }) {
             <div className="message-content">Loading conversation...</div>
           </div>
         ) : (
-          messages.map((msg) => (
+          getMessagesArray().map((msg) => (
             <div key={msg.id} className={`message ${msg.type}`}>
               <div className="message-content">{msg.text}</div>
             </div>

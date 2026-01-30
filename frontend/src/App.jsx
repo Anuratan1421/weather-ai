@@ -19,7 +19,7 @@ function ChatInterface() {
   const fetchWeather = async (city) => {
     setLoading(true);
     try {
-      const res = await fetch(`https://sanch-ai.vercel.app/api/weather?city=${city}`);
+      const res = await fetch(`http://localhost:3000/api/weather?city=${city}`);
       const data = await res.json();
       setWeatherData(data);
     } catch (error) {
@@ -34,7 +34,7 @@ function ChatInterface() {
 
   const handleNewChat = async () => {
     try {
-      const res = await fetch("https://sanch-ai.vercel.app/api/conversations", {
+      const res = await fetch("http://localhost:3000/api/conversations", {
         method: "POST"
       });
       
@@ -55,11 +55,11 @@ function ChatInterface() {
     }
   };
 
-  // Handler for first message - creates conversation, navigates, and sends message
+  // Handler for first message - creates conversation and returns ID
   const handleFirstMessage = async (message) => {
     if (!conversationId) {
       try {
-        const res = await fetch("https://sanch-ai.vercel.app/api/conversations", {
+        const res = await fetch("http://localhost:3000/api/conversations", {
           method: "POST",
           headers: {
             "Content-Type": "application/json"
@@ -80,22 +80,10 @@ function ChatInterface() {
         }
         
         const newConversationId = data.conversationId;
+        console.log('✅ Created conversation:', newConversationId);
         
-        // Navigate to new conversation
-        navigate(`/c/${newConversationId}`, { replace: true });
-        
-        // Send the message after navigation
-        setTimeout(async () => {
-          try {
-            await fetch(`https://sanch-ai.vercel.app/api/chat/${newConversationId}`, {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ message }),
-            });
-          } catch (err) {
-            console.error('Failed to send first message:', err);
-          }
-        }, 500);
+        // Navigate to new conversation - ChatCard will handle sending the message
+        navigate(`/c/${newConversationId}`, { replace: true, state: { pendingMessage: message } });
         
         return newConversationId;
       } catch (error) {

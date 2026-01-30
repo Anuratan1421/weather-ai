@@ -6,6 +6,8 @@ import { randomUUID } from "crypto";
 import { EventEmitter } from "events";
 import mongoose from "mongoose";
 import { createClient } from "redis";
+import { StreamManager } from "./lib/stream-manager.js";
+import { SSEConnectionManager } from "./lib/sse-handler.js";
 
 import { ChatOpenAI } from "@langchain/openai";
 import { tool } from "langchain";
@@ -82,6 +84,13 @@ redisClient.on('connect', () => console.log('✅ Redis connected'));
 
 await redisClient.connect();
 
+// Initialize stream manager and SSE handler
+const streamManager = new StreamManager(redisClient);
+const sseManager = new SSEConnectionManager();
+
+// Cleanup old streams every 30 minutes
+setInterval(() => streamManager.cleanup(), 30 * 60 * 1000);
+
 // ---------------- MONGODB SCHEMA ----------------
 const conversationSchema = new mongoose.Schema({
   conversationId: { type: String, required: true, unique: true, index: true },
@@ -138,13 +147,6 @@ function setCachedConversation(id, data) {
     timestamp: Date.now()
   });
 }
-
-// EventEmitter for broadcasting to multiple clients
-const conversationEvents = new EventEmitter();
-conversationEvents.setMaxListeners(100); // Support many concurrent connections
-
-// Track SSE clients per conversation
-const conversationClients = new Map(); // conversationId -> Set of response objects
 
 // ---------------- LLM SETUP ----------------
 const llm = new ChatOpenAI({
@@ -296,8 +298,8 @@ app.get("/api/conversations/:id", checkDBConnection, async (req, res) => {
       setCachedConversation(req.params.id, conversation);
     }
     
-    // Filter out messages still streaming
-    const messages = conversation.messages.filter(m => !m.streaming);
+    // Include all messages, including streaming ones - frontend handles display
+    const messages = conversation.messages;
     
     res.json({
       id: conversation.conversationId,
@@ -340,28 +342,18 @@ app.get("/api/stream/:conversationId", async (req, res) => {
   const conversationId = req.params.conversationId;
   const lastEventId = req.headers['last-event-id'];
 
-  console.log(`📡 SSE: ${conversationId} | Last-Event-ID: ${lastEventId || 'new'}`);
+  console.log(`📡 SSE: ${conversationId} | Last-Event-ID: ${lastEventId || 'new'} | Clients: ${sseManager.getClientCount(conversationId)}`);
 
-  // Set SSE headers
-  res.setHeader("Content-Type", "text/event-stream");
-  res.setHeader("Cache-Control", "no-cache, no-transform");
-  res.setHeader("Connection", "keep-alive");
-  res.setHeader("X-Accel-Buffering", "no");
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  res.flushHeaders();
-
-  // Add this client to the conversation's client list
-  if (!conversationClients.has(conversationId)) {
-    conversationClients.set(conversationId, new Set());
-  }
-  conversationClients.get(conversationId).add(res);
-
-  // Handle reconnection - send current message state instead of replaying tokens
-  const streamKey = `stream:${conversationId}`;
+  // Set SSE headers and start heartbeat
+  const heartbeat = sseManager.setupSSE(res);
   
+  // Add this client to the conversation's client list
+  sseManager.addConnection(conversationId, res);
+
+  // Handle reconnection - send current message state
   if (lastEventId) {
     try {
-      console.log(`🔄 Reconnect: checking messages from ${lastEventId}`);
+      console.log(`🔄 Reconnect: syncing state from ${lastEventId}`);
       
       // Get current conversation state from DB
       const conversation = await Conversation.findOne({ conversationId }).lean();
@@ -371,131 +363,59 @@ app.get("/api/stream/:conversationId", async (req, res) => {
           id: m.id,
           type: m.type,
           text: m.text,
-          streaming: m.streaming || false
+          streaming: m.streaming || false,
+          timestamp: m.timestamp
         }));
         
-        if (allMessages.length > 0) {
-          const syncData = {
-            type: "sync",
-            messages: allMessages
-          };
-          const syncEventId = `sync-${Date.now()}`;
-          res.write(`id: ${syncEventId}\ndata: ${JSON.stringify(syncData)}\n\n`);
+        const syncData = {
+          type: "sync",
+          messages: allMessages,
+          syncedAt: Date.now()
+        };
+        const syncEventId = `sync-${Date.now()}`;
+        
+        sseManager.sendToClient(res, 'message', syncData, syncEventId);
+        
+        // Check for active streaming messages
+        const streamingMsg = allMessages.find(m => m.streaming);
+        if (streamingMsg) {
+          console.log(`📝 Active stream: ${streamingMsg.id}, length: ${streamingMsg.text?.length || 0}`);
           
-          // Log streaming message info
-          const streamingMsg = allMessages.find(m => m.streaming);
-          if (streamingMsg) {
-            console.log(`📝 Sync includes streaming message ${streamingMsg.id}, text length: ${streamingMsg.text?.length || 0}`);
+          // Try to resume the stream
+          const streamId = `stream:${conversationId}:${streamingMsg.id}`;
+          const resumeResult = await streamManager.resumeStream(streamId);
+          
+          if (resumeResult.found && resumeResult.status === 'active') {
+            // Update the streaming message text in allMessages with current stream text
+            const msgIndex = allMessages.findIndex(m => m.id === streamingMsg.id);
+            if (msgIndex !== -1) {
+              allMessages[msgIndex].text = resumeResult.text;
+            }
+            
+            sseManager.sendToClient(res, 'message', {
+              type: 'resume',
+              messageId: streamingMsg.id,
+              currentText: resumeResult.text,
+              isComplete: false
+            });
           }
         }
       }
-      
-      // Do NOT replay token events - sync is source of truth
-      // Tokens are disposable, persisted text is authoritative
     } catch (err) {
       console.error('❌ Reconnect error:', err);
     }
   } else {
     // New connection - send connected event
-    try {
-      const eventData = { type: "connected", conversationId };
-      const eventId = await redisClient.xAdd(streamKey, '*', {
-        data: JSON.stringify(eventData)
-      });
-      // Set TTL immediately to prevent memory leak
-      await redisClient.expire(streamKey, 7200); // 2 hours
-      res.write(`id: ${eventId}\ndata: ${JSON.stringify(eventData)}\n\n`);
-    } catch (err) {
-      console.error('❌ Redis error:', err);
-      const fallbackId = `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
-      res.write(`id: ${fallbackId}\ndata: ${JSON.stringify({ type: "connected", conversationId })}\n\n`);
-    }
+    const eventData = { type: "connected", conversationId, timestamp: Date.now() };
+    const eventId = `conn-${Date.now()}`;
+    sseManager.sendToClient(res, 'message', eventData, eventId);
   }
-
-  // Set up event listeners for this conversation
-  const messageHandler = async (data) => {
-    try {
-      const eventData = { type: "message", message: data.message };
-      const eventId = await redisClient.xAdd(streamKey, '*', {
-        data: JSON.stringify(eventData)
-      });
-      res.write(`id: ${eventId}\ndata: ${JSON.stringify(eventData)}\n\n`);
-    } catch (err) {
-      console.error("❌ Message handler error:", err);
-    }
-  };
-
-  // Token handler - send tokens immediately without buffering
-  // Buffering caused duplicate text across multiple clients
-  const tokenHandler = async (data) => {
-    try {
-      // Send token immediately to this client
-      const eventData = { type: "token", content: data.content, messageId: data.messageId };
-      const eventId = await redisClient.xAdd(streamKey, '*', {
-        data: JSON.stringify(eventData)
-      });
-      res.write(`id: ${eventId}\ndata: ${JSON.stringify(eventData)}\n\n`);
-    } catch (err) {
-      console.error("❌ Token handler error:", err);
-    }
-  };
-
-  const statusHandler = async (data) => {
-    try {
-      const eventData = { type: "status", content: data.content };
-      const eventId = await redisClient.xAdd(streamKey, '*', {
-        data: JSON.stringify(eventData)
-      });
-      res.write(`id: ${eventId}\ndata: ${JSON.stringify(eventData)}\n\n`);
-    } catch (err) {
-      console.error("❌ Status handler error:", err);
-    }
-  };
-
-  const doneHandler = async (data) => {
-    try {
-      const eventData = { type: "done", messageId: data.messageId };
-      const eventId = await redisClient.xAdd(streamKey, '*', {
-        data: JSON.stringify(eventData)
-      });
-      res.write(`id: ${eventId}\ndata: ${JSON.stringify(eventData)}\n\n`);
-      
-      // Extend TTL after completion
-      await redisClient.expire(streamKey, 7200);
-    } catch (err) {
-      console.error("❌ Done handler error:", err);
-    }
-  };
-
-  conversationEvents.on(`${conversationId}:message`, messageHandler);
-  conversationEvents.on(`${conversationId}:token`, tokenHandler);
-  conversationEvents.on(`${conversationId}:status`, statusHandler);
-  conversationEvents.on(`${conversationId}:done`, doneHandler);
-
-  // Send heartbeat every 30 seconds to keep connection alive
-  const heartbeat = setInterval(() => {
-    try {
-      res.write(`: heartbeat ${Date.now()}\n\n`);
-    } catch (err) {
-      clearInterval(heartbeat);
-    }
-  }, 30000);
 
   // Clean up on client disconnect
   req.on("close", () => {
     clearInterval(heartbeat);
-    conversationEvents.off(`${conversationId}:message`, messageHandler);
-    conversationEvents.off(`${conversationId}:token`, tokenHandler);
-    conversationEvents.off(`${conversationId}:status`, statusHandler);
-    conversationEvents.off(`${conversationId}:done`, doneHandler);
-    
-    const clients = conversationClients.get(conversationId);
-    if (clients) {
-      clients.delete(res);
-      if (clients.size === 0) {
-        conversationClients.delete(conversationId);
-      }
-    }
+    sseManager.removeConnection(conversationId, res);
+    console.log(`🔌 Client disconnected: ${conversationId} | Remaining: ${sseManager.getClientCount(conversationId)}`);
   });
 });
 
@@ -535,16 +455,18 @@ app.post("/api/chat/:conversationId", checkDBConnection, async (req, res) => {
       timestamp: new Date(),
       streaming: false
     };
-    conversation.messages.push(userMsg);
-    await conversation.save();
+    await Conversation.findOneAndUpdate(
+      { conversationId },
+      { $push: { messages: userMsg } }
+    );
     
     // Invalidate cache
     conversationCache.delete(conversationId);
 
-    // CRITICAL: Broadcast user message SYNCHRONOUSLY first to ALL connected clients
-    // This MUST happen before status to ensure users see the question before the answer
-    conversationEvents.emit(`${conversationId}:message`, {
-      message: { type: "user", text: userMessage, id: userMsgId }
+    // CRITICAL: Broadcast user message to ALL connected clients
+    sseManager.broadcast(conversationId, 'message', {
+      type: "message",
+      message: { type: "user", text: userMessage, id: userMsgId, timestamp: new Date() }
     });
 
     // Send immediate response to poster
@@ -554,10 +476,12 @@ app.post("/api/chat/:conversationId", checkDBConnection, async (req, res) => {
     setImmediate(async () => {
       const botMsgId = `bot-${Date.now()}`;
       let fullReply = "";
+      let streamId = null;
       
       try {
         // Broadcast processing status AFTER user message is sent
-        conversationEvents.emit(`${conversationId}:status`, {
+        sseManager.broadcast(conversationId, 'message', {
+          type: "status",
           content: "processing"
         });
         
@@ -582,7 +506,8 @@ app.post("/api/chat/:conversationId", checkDBConnection, async (req, res) => {
               conversation.lastCity = call.args.city;
 
               // Broadcast status to all connected clients
-              conversationEvents.emit(`${conversationId}:status`, {
+              sseManager.broadcast(conversationId, 'message', {
+                type: "status",
                 content: "Fetching weather data...",
               });
 
@@ -598,8 +523,12 @@ app.post("/api/chat/:conversationId", checkDBConnection, async (req, res) => {
           }
         }
 
+        // Create resumable stream
+        streamId = await streamManager.createStream(conversationId, botMsgId);
+
         // Broadcast that streaming is starting
-        conversationEvents.emit(`${conversationId}:status`, {
+        sseManager.broadcast(conversationId, 'message', {
+          type: "status",
           content: "generating"
         });
 
@@ -617,29 +546,43 @@ app.post("/api/chat/:conversationId", checkDBConnection, async (req, res) => {
           if (text) {
             fullReply += text;
             
+            // Append to resumable stream
+            await streamManager.appendToStream(streamId, text);
+            
             // Broadcast token to all connected clients
-            conversationEvents.emit(`${conversationId}:token`, {
+            const clientCount = sseManager.getClientCount(conversationId);
+            console.log(`📤 Broadcasting token to ${clientCount} clients:`, text.substring(0, 20));
+            sseManager.broadcast(conversationId, 'message', {
+              type: "token",
               content: text,
               messageId: botMsgId
             });
             
             // CRITICAL: Persist full accumulated text on EVERY token
             // This ensures database is always authoritative source of truth
-            const msgIndex = conversation.messages.findIndex(m => m.id === botMsgId);
-            if (msgIndex === -1) {
+            const existingMsg = await Conversation.findOne(
+              { conversationId, "messages.id": botMsgId }
+            );
+            
+            if (!existingMsg) {
               // First token - create the message
-              conversation.messages.push({
-                id: botMsgId,
-                type: "bot",
-                text: fullReply,
-                timestamp: new Date(),
-                streaming: true
-              });
+              await Conversation.findOneAndUpdate(
+                { conversationId },
+                { $push: { messages: {
+                  id: botMsgId,
+                  type: "bot",
+                  text: fullReply,
+                  timestamp: new Date(),
+                  streaming: true
+                } } }
+              );
             } else {
               // Update existing message with full accumulated text
-              conversation.messages[msgIndex].text = fullReply;
+              await Conversation.findOneAndUpdate(
+                { conversationId, "messages.id": botMsgId },
+                { $set: { "messages.$.text": fullReply } }
+              );
             }
-            await conversation.save();
           }
         }
 
@@ -648,22 +591,36 @@ app.post("/api/chat/:conversationId", checkDBConnection, async (req, res) => {
           fullReply = "Here's the weather information you requested 🌦";
         }
 
-        // Final save with streaming=false
-        const msgIndex = conversation.messages.findIndex(m => m.id === botMsgId);
-        if (msgIndex !== -1) {
-          conversation.messages[msgIndex].text = fullReply;
-          conversation.messages[msgIndex].streaming = false;
+        // Complete the stream
+        if (streamId) {
+          await streamManager.completeStream(streamId);
         }
-        
-        conversation.history.push({ type: "human", text: userMessage });
-        conversation.history.push({ type: "ai", text: fullReply });
-        await conversation.save();
+
+        // Final save with streaming=false
+        await Conversation.findOneAndUpdate(
+          { conversationId, "messages.id": botMsgId },
+          { 
+            $set: { 
+              "messages.$.text": fullReply, 
+              "messages.$.streaming": false 
+            },
+            $push: { 
+              history: { 
+                $each: [
+                  { type: "human", text: userMessage },
+                  { type: "ai", text: fullReply }
+                ]
+              }
+            }
+          }
+        );
         
         // Invalidate cache
         conversationCache.delete(conversationId);
 
         // Broadcast completion to all connected clients
-        conversationEvents.emit(`${conversationId}:done`, {
+        sseManager.broadcast(conversationId, 'message', {
+          type: "done",
           messageId: botMsgId
         });
 
@@ -671,16 +628,17 @@ app.post("/api/chat/:conversationId", checkDBConnection, async (req, res) => {
         console.error("AI processing error:", error);
         
         // Remove streaming message on error
-        const msgIndex = conversation.messages.findIndex(m => m.id === botMsgId);
-        if (msgIndex !== -1) {
-          conversation.messages.splice(msgIndex, 1);
-          await conversation.save();
-        }
+        await Conversation.findOneAndUpdate(
+          { conversationId },
+          { $pull: { messages: { id: botMsgId } } }
+        );
         
-        conversationEvents.emit(`${conversationId}:message`, {
+        sseManager.broadcast(conversationId, 'message', {
+          type: "message",
           message: { type: "bot", text: "Sorry, an error occurred.", id: `error-${Date.now()}` }
         });
-        conversationEvents.emit(`${conversationId}:done`, {
+        sseManager.broadcast(conversationId, 'message', {
+          type: "done",
           messageId: botMsgId
         });
       }
@@ -692,6 +650,59 @@ app.post("/api/chat/:conversationId", checkDBConnection, async (req, res) => {
   }
 }); 
 
+
+// ---------------- RESUME STREAM ENDPOINT ----------------
+app.get("/api/conversations/:conversationId/resume", checkDBConnection, async (req, res) => {
+  const { conversationId } = req.params;
+  const { messageId } = req.query;
+
+  try {
+    if (!messageId) {
+      return res.status(400).json({ error: "messageId required" });
+    }
+
+    // Get conversation from DB
+    const conversation = await Conversation.findOne({ conversationId }).lean();
+    
+    if (!conversation) {
+      return res.status(404).json({ error: "Conversation not found" });
+    }
+
+    // Find the message
+    const message = conversation.messages.find(m => m.id === messageId);
+    
+    if (!message) {
+      return res.status(404).json({ error: "Message not found" });
+    }
+
+    // Try to resume from stream manager
+    const streamId = `stream:${conversationId}:${messageId}`;
+    const resumeResult = await streamManager.resumeStream(streamId);
+
+    if (resumeResult.found) {
+      return res.json({
+        success: true,
+        messageId,
+        text: resumeResult.text,
+        status: resumeResult.status,
+        isStreaming: message.streaming || false
+      });
+    }
+
+    // Fallback to database message
+    return res.json({
+      success: true,
+      messageId,
+      text: message.text,
+      status: message.streaming ? "active" : "completed",
+      isStreaming: message.streaming || false
+    });
+
+  } catch (error) {
+    console.error("Resume stream error:", error);
+    res.status(500).json({ error: "Failed to resume stream" });
+  }
+});
 
 // ---------------- WEATHER CARD API ----------------
 app.get("/api/weather", async (req, res) => {
@@ -730,4 +741,4 @@ app.get("/api/weather", async (req, res) => {
 
 // ---------------- SERVER START ----------------
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Server running http://localhost:${PORT}`));
+app.listen(PORT, () => console.log(`Server running http://localhost:${PORT}`));  
