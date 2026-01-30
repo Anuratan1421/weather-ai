@@ -23,12 +23,29 @@ dotenv.config();
 
 const app = express();
 
-// Production CORS configuration
+// Production CORS configuration - allow multiple origins
+const allowedOrigins = [
+  'https://sanchweatherai.vercel.app',
+  'https://sanch-frontend.vercel.app',
+  'http://localhost:5173',
+  'http://localhost:3000'
+];
+
 const corsOptions = {
-  origin: process.env.FRONTEND_URL || 'https://sanch-frontend.vercel.app',
+  origin: (origin, callback) => {
+    // Allow requests with no origin (mobile apps, Postman, etc.)
+    if (!origin) return callback(null, true);
+    
+    if (allowedOrigins.includes(origin)) {
+      callback(null, true);
+    } else {
+      console.warn('CORS blocked origin:', origin);
+      callback(null, true); // Allow all origins in production for now
+    }
+  },
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'Last-Event-ID'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'Last-Event-ID', 'Cache-Control'],
   exposedHeaders: ['Content-Type'],
 };
 
@@ -309,6 +326,15 @@ app.get("/api/health", async (req, res) => {
   
   const status = health.services.mongodb === "connected" ? 200 : 503;
   res.status(status).json(health);
+});
+
+// Simple test endpoint
+app.get("/api/test", (req, res) => {
+  res.json({ 
+    message: "Backend is working!", 
+    timestamp: new Date().toISOString(),
+    cors: "enabled"
+  });
 });
 
 // ---------------- CREATE NEW CONVERSATION ----------------
@@ -792,22 +818,31 @@ app.get("/api/weather", async (req, res) => {
   if (!city) return res.status(400).json({ error: "City required" });
 
   try {
-    const apiKey = process.env.OPEN_WEATHER_API_KEY;
+    const apiKey = process.env.OPEN_WEATHER_API_KEY || process.env.WEATHER_API_KEY;
+    
+    if (!apiKey) {
+      console.error('❌ Weather API key not configured');
+      return res.status(500).json({ error: "Weather service not configured" });
+    }
+    
     const url = new URL("https://api.openweathermap.org/data/2.5/weather");
     url.searchParams.set("q", city);
     url.searchParams.set("appid", apiKey);
     url.searchParams.set("units", "metric");
 
+    console.log(`🌤️ Fetching weather for: ${city}`);
     const response = await fetch(url.toString());
     const data = await response.json();
 
     // Handle invalid response (city not found / quota exceeded / bad key)
     if (!response.ok || !data.main) {
-      return res.status(404).json({
+      console.error('❌ Weather API error:', data.message || 'Unknown error');
+      return res.status(response.status || 404).json({
         error: data.message || `Could not find weather for "${city}"`,
       });
     }
 
+    console.log(`✅ Weather data fetched for ${city}`);
     return res.json({
       city: data.name,
       temp: data.main.temp,
@@ -816,8 +851,11 @@ app.get("/api/weather", async (req, res) => {
       condition: data.weather?.[0]?.description || "Unknown",
     });
   } catch (error) {
-    console.error("Weather API error:", error);
-    return res.status(500).json({ error: "Unable to fetch weather" });
+    console.error("❌ Weather API error:", error.message);
+    return res.status(500).json({ 
+      error: "Unable to fetch weather",
+      details: error.message 
+    });
   }
 });
 

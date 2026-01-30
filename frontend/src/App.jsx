@@ -19,13 +19,28 @@ function ChatInterface() {
   const fetchWeather = async (city) => {
     setLoading(true);
     try {
-      const res = await fetch(`https://sanch-ai.vercel.app/api/weather?city=${city}`);
+      const res = await fetch(`https://sanch-ai.vercel.app/api/weather?city=${city}`, {
+        method: 'GET',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+      });
+      
+      if (!res.ok) {
+        const errorData = await res.json().catch(() => ({ error: 'Failed to fetch weather' }));
+        console.error("Weather API Error:", errorData);
+        setWeatherData({ error: errorData.error || 'Failed to fetch weather' });
+        return;
+      }
+      
       const data = await res.json();
       setWeatherData(data);
     } catch (error) {
       console.error("Weather API Error:", error);
+      setWeatherData({ error: 'Unable to connect to weather service. Please try again.' });
+    } finally {
+      setLoading(false);
     }
-    setLoading(false);
   };
 
   useEffect(() => {

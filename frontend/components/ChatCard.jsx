@@ -5,7 +5,7 @@ import { useNavigate, useLocation } from "react-router-dom"
 import { useStreamManager } from "../hooks/useStreamManager"
 import "./ChatCard.css"
 
-const API_BASE = "http://localhost:3000";
+const API_BASE = "https://sanch-ai.vercel.app";
 
 function ChatCard({ conversationId, onFirstMessage }) {
   const navigate = useNavigate();
@@ -232,13 +232,18 @@ function ChatCard({ conversationId, onFirstMessage }) {
     try {
       const res = await fetch(`${API_BASE}/api/chat/${conversationId}`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { 
+          "Content-Type": "application/json",
+          "Accept": "application/json"
+        },
         body: JSON.stringify({ message: messageText }),
       });
 
       if (!res.ok) {
-        const errorData = await res.json().catch(() => ({}));
-        throw new Error(errorData.message || `HTTP ${res.status}`);
+        const errorData = await res.json().catch(() => ({ 
+          error: `Server error: ${res.status}` 
+        }));
+        throw new Error(errorData.error || errorData.message || `HTTP ${res.status}`);
       }
 
       const result = await res.json();
