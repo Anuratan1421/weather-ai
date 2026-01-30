@@ -164,6 +164,19 @@ function ChatCard({ conversationId, onFirstMessage }) {
         // (optional: could set streaming: false)
         return map;
       } else if (data.type === "connected") {
+        console.log('✅ SSE Connected');
+        return map;
+      } else if (data.type === "error") {
+        setIsTyping(false);
+        // Show error message to user
+        const maxOrder = Math.max(0, ...Array.from(map.values()).map(m => m.order ?? 0));
+        map.set(`error-${Date.now()}`, {
+          id: `error-${Date.now()}`,
+          type: "bot",
+          text: data.message || "Connection error. Please refresh the page.",
+          order: maxOrder + 1,
+          isError: true
+        });
         return map;
       }
       return map;

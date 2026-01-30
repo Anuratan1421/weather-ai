@@ -19,7 +19,7 @@ function ChatInterface() {
   const fetchWeather = async (city) => {
     setLoading(true);
     try {
-      const res = await fetch(`http://localhost:3000/api/weather?city=${city}`);
+      const res = await fetch(`https://sanch-ai.vercel.app/api/weather?city=${city}`);
       const data = await res.json();
       setWeatherData(data);
     } catch (error) {
@@ -34,7 +34,7 @@ function ChatInterface() {
 
   const handleNewChat = async () => {
     try {
-      const res = await fetch("http://localhost:3000/api/conversations", {
+      const res = await fetch("https://sanch-ai.vercel.app/api/conversations", {
         method: "POST"
       });
       
@@ -59,7 +59,7 @@ function ChatInterface() {
   const handleFirstMessage = async (message) => {
     if (!conversationId) {
       try {
-        const res = await fetch("http://localhost:3000/api/conversations", {
+        const res = await fetch("https://sanch-ai.vercel.app/api/conversations", {
           method: "POST",
           headers: {
             "Content-Type": "application/json"

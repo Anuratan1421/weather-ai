@@ -28,7 +28,7 @@ export const useStreamManager = (conversationId, onMessage, enabled = true) => {
 
     cleanup();
 
-    const API_BASE = import.meta.env.VITE_API_BASE || "http://localhost:3000";
+    const API_BASE = import.meta.env.VITE_API_BASE || "https://sanch-ai.vercel.app";
     console.log(`🔗 Connecting SSE: ${conversationId} | URL: ${API_BASE}/api/stream/${conversationId}`);
     
     const eventSource = new EventSource(`${API_BASE}/api/stream/${conversationId}`);
@@ -66,7 +66,14 @@ export const useStreamManager = (conversationId, onMessage, enabled = true) => {
           connect();
         }, delay);
       } else {
-        console.error('❌ Max reconnection attempts reached');
+        console.error('❌ Max reconnection attempts reached. Please refresh the page.');
+        // Notify user
+        if (onMessage) {
+          onMessage({
+            type: 'error',
+            message: 'Connection lost. Please refresh the page to reconnect.'
+          });
+        }
       }
     };
   }, [conversationId, enabled, onMessage, cleanup]);

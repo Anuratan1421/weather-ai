@@ -22,38 +22,69 @@ import {
 dotenv.config();
 
 const app = express();
-app.use(cors());
+
+// Production CORS configuration
+const corsOptions = {
+  origin: process.env.FRONTEND_URL || 'https://sanch-frontend.vercel.app',
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'Last-Event-ID'],
+  exposedHeaders: ['Content-Type'],
+};
+
+app.use(cors(corsOptions));
 app.use(express.json());
-app.use(express.static("public")); // serve frontend
+app.use(express.static("public"));
 
 // ---------------- MONGODB CONNECTION ----------------
-// Optimized for Vercel Serverless - minimal pooling
+// Production-ready connection with auto-reconnect and health checks
+let isConnecting = false;
+
 const connectDB = async () => {
+  if (isConnecting) return;
+  isConnecting = true;
+  
   try {
     await mongoose.connect(process.env.MONGO_URI, {
-      serverSelectionTimeoutMS: 3000,  // Faster timeout
+      serverSelectionTimeoutMS: 5000,
       socketTimeoutMS: 45000,
-      connectTimeoutMS: 3000,  // Add connection timeout
-      // Optimized pooling for better performance
-      minPoolSize: 10,  // Keep more connections warm
-      maxPoolSize: 50,  // Allow more concurrent connections
-      maxIdleTimeMS: 60000,  // Keep connections alive longer
-      maxConnecting: 10,  // Allow more parallel connections
+      connectTimeoutMS: 10000,
+      minPoolSize: 5,
+      maxPoolSize: 20,
+      maxIdleTimeMS: 30000,
+      retryWrites: true,
+      retryReads: true,
     });
-    console.log('✅ MongoDB connected');
+    console.log('✅ MongoDB connected successfully');
+    isConnecting = false;
   } catch (err) {
-    console.error('❌ MongoDB connection error:', err);
-    // Retry connection after 2 seconds for faster recovery
-    setTimeout(connectDB, 2000);
+    console.error('❌ MongoDB connection error:', err.message);
+    isConnecting = false;
+    // Retry with exponential backoff
+    setTimeout(connectDB, 5000);
   }
 };
 
+mongoose.connection.on('connected', () => {
+  console.log('✅ MongoDB connection established');
+});
+
 mongoose.connection.on('disconnected', () => {
-  console.log('⚠️ MongoDB disconnected. Attempting to reconnect...');
+  console.log('⚠️ MongoDB disconnected. Reconnecting...');
+  if (!isConnecting) {
+    connectDB();
+  }
 });
 
 mongoose.connection.on('error', (err) => {
-  console.error('❌ MongoDB error:', err);
+  console.error('❌ MongoDB error:', err.message);
+  if (!isConnecting && mongoose.connection.readyState === 0) {
+    connectDB();
+  }
+});
+
+mongoose.connection.on('reconnected', () => {
+  console.log('✅ MongoDB reconnected');
 });
 
 connectDB();
@@ -75,7 +106,16 @@ const redisClient = createClient({
   password: process.env.REDIS_PASSWORD,
   socket: {
     host: process.env.REDIS_HOST,
-    port: parseInt(process.env.REDIS_PORT)
+    port: parseInt(process.env.REDIS_PORT),
+    reconnectStrategy: (retries) => {
+      if (retries > 10) {
+        console.error('❌ Redis max reconnection attempts reached');
+        return new Error('Max reconnection attempts reached');
+      }
+      const delay = Math.min(retries * 100, 3000);
+      console.log(`🔄 Redis reconnecting in ${delay}ms...`);
+      return delay;
+    }
   }
 });
 
@@ -254,6 +294,23 @@ RULES:
 7. For creative requests (stories, poems, etc.), make them long, detailed, and engaging.
 `;
 
+// ---------------- HEALTH CHECK ENDPOINT ----------------
+app.get("/api/health", async (req, res) => {
+  const health = {
+    status: "ok",
+    timestamp: new Date().toISOString(),
+    services: {
+      mongodb: mongoose.connection.readyState === 1 ? "connected" : "disconnected",
+      redis: redisClient.isOpen ? "connected" : "disconnected",
+    },
+    uptime: process.uptime(),
+    memory: process.memoryUsage(),
+  };
+  
+  const status = health.services.mongodb === "connected" ? 200 : 503;
+  res.status(status).json(health);
+});
+
 // ---------------- CREATE NEW CONVERSATION ----------------
 app.post("/api/conversations", checkDBConnection, async (req, res) => {
   try {
@@ -343,6 +400,13 @@ app.get("/api/stream/:conversationId", async (req, res) => {
   const lastEventId = req.headers['last-event-id'];
 
   console.log(`📡 SSE: ${conversationId} | Last-Event-ID: ${lastEventId || 'new'} | Clients: ${sseManager.getClientCount(conversationId)}`);
+
+  // Set SSE headers with Vercel-compatible configuration
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache, no-transform');
+  res.setHeader('Connection', 'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no'); // Disable nginx buffering
+  res.flushHeaders();
 
   // Set SSE headers and start heartbeat
   const heartbeat = sseManager.setupSSE(res);
@@ -457,13 +521,18 @@ app.post("/api/chat/:conversationId", checkDBConnection, async (req, res) => {
     };
     await Conversation.findOneAndUpdate(
       { conversationId },
-      { $push: { messages: userMsg } }
+      { 
+        $push: { messages: userMsg },
+        $set: { lastActivity: new Date() }
+      }
     );
     
     // Invalidate cache
     conversationCache.delete(conversationId);
 
     // CRITICAL: Broadcast user message to ALL connected clients
+    const clientCount = sseManager.getClientCount(conversationId);
+    console.log(`📤 Broadcasting user message to ${clientCount} clients`);
     sseManager.broadcast(conversationId, 'message', {
       type: "message",
       message: { type: "user", text: userMessage, id: userMsgId, timestamp: new Date() }
@@ -479,7 +548,15 @@ app.post("/api/chat/:conversationId", checkDBConnection, async (req, res) => {
       let streamId = null;
       
       try {
+        // Refetch conversation for latest history
+        const latestConversation = await Conversation.findOne({ conversationId });
+        if (!latestConversation) {
+          console.error('❌ Conversation not found:', conversationId);
+          return;
+        }
+        
         // Broadcast processing status AFTER user message is sent
+        console.log(`📤 Broadcasting status to ${sseManager.getClientCount(conversationId)} clients`);
         sseManager.broadcast(conversationId, 'message', {
           type: "status",
           content: "processing"
@@ -488,7 +565,7 @@ app.post("/api/chat/:conversationId", checkDBConnection, async (req, res) => {
         // Build LangChain messages
         const messages = [new SystemMessage(SYSTEM_PROMPT)];
 
-        for (const m of conversation.history) {
+        for (const m of latestConversation.history) {
           if (m.type === "human") messages.push(new HumanMessage(m.text));
           if (m.type === "ai") messages.push(new AIMessage(m.text));
         }
@@ -503,9 +580,14 @@ app.post("/api/chat/:conversationId", checkDBConnection, async (req, res) => {
         if (aiMessage.tool_calls?.length) {
           for (const call of aiMessage.tool_calls) {
             if (call.name === "get_weather") {
-              conversation.lastCity = call.args.city;
+              // Update lastCity in database
+              await Conversation.findOneAndUpdate(
+                { conversationId },
+                { $set: { lastCity: call.args.city } }
+              );
 
               // Broadcast status to all connected clients
+              console.log(`📤 Broadcasting weather status to ${sseManager.getClientCount(conversationId)} clients`);
               sseManager.broadcast(conversationId, 'message', {
                 type: "status",
                 content: "Fetching weather data...",
